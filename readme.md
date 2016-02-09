@@ -2,7 +2,7 @@
 
 **Work in progress append-only scuttlebutt db with nested data.**
 
-[![npm status](http://img.shields.io/npm/v/space-shuttle.svg?style=flat-square)](https://www.npmjs.org/package/space-shuttle)
+[![npm status](http://img.shields.io/npm/v/space-shuttle.svg?style=flat-square)](https://www.npmjs.org/package/space-shuttle) [![Travis build status](https://img.shields.io/travis/vweevers/space-shuttle.svg?style=flat-square&label=travis)](http://travis-ci.org/vweevers/space-shuttle) [![AppVeyor build status](https://img.shields.io/appveyor/ci/vweevers/space-shuttle.svg?style=flat-square&label=appveyor)](https://ci.appveyor.com/project/vweevers/space-shuttle) [![Dependency status](https://img.shields.io/david/vweevers/space-shuttle.svg?style=flat-square)](https://david-dm.org/vweevers/space-shuttle)
 
 ## features
 
