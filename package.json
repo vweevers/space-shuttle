@@ -1,6 +1,6 @@
 {
   "name": "space-shuttle",
-  "version": "0.0.1",
+  "version": "0.1.0",
   "description": "wip append-only scuttlebutt db with nested data",
   "license": "MIT",
   "author": {
