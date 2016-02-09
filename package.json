@@ -78,5 +78,8 @@
   "engines": {
     "node": ">=0.10.0",
     "npm": ">=2.0.0"
-  }
+  },
+  "repository": "vweevers/space-shuttle",
+  "bugs": "https://github.com/vweevers/space-shuttle/issues",
+  "homepage": "https://github.com/vweevers/space-shuttle"
 }
