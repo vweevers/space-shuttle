@@ -13,7 +13,6 @@ const bytespace = require('bytespace')
     , fastFuture = require('fast-future')
     , NotFoundError = require('level-errors').NotFoundError
     , probe = require('level-probe')
-    , JSONStream = require('JSONStream')
     , duplexify = require('duplexify')
     , Stream = require('stream-wrapper')
     , autobind = require('autobind-decorator')
