@@ -1,0 +1,21 @@
+version: "{build}"
+build: off
+shallow_clone: true
+skip_tags: true
+
+environment:
+  matrix:
+    - nodejs_version: "0.10"
+    - nodejs_version: "4"
+
+install:
+  - ps: Install-Product node $env:nodejs_version
+  - npm -g i npm@latest-2
+  - npm -g i node-gyp@latest prebuild@latest
+  - set PATH=%APPDATA%\npm;%PATH%;%APPVEYOR_BUILD_FOLDER%\node_modules\.bin
+  - npm i
+
+test_script:
+  - node --version
+  - npm --version
+  - npm test
