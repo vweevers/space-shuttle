@@ -33,6 +33,7 @@
     "kindof": "~2.0.0",
     "level-errors": "~1.0.4",
     "level-iterator": "0.0.1",
+    "level-iterator-stream": "~1.3.1",
     "level-probe": "0.0.2",
     "mini-type-assert": "~0.1.2",
     "monotonic-timestamp": "0.0.9",

@@ -19,6 +19,8 @@ const bytespace = require('bytespace')
     , skipStream = require('./skip-stream')
     , batchStream = require('./batch-stream')
     , liveStream = require('./live-stream')
+    , iteratorStream = require('level-iterator-stream')
+    , noop = function() {}
 
 const LO = bytewise.bound.lower()
     , HI = bytewise.bound.upper()
@@ -323,32 +325,61 @@ class SpaceShuttle extends Emitter {
     })
   }
 
-  readStream(opts = {}) {
-    const { keys = true, values = true, path, old, erased, ...range } = opts
+  iterator(opts = {}) {
+    const { keys = true, values = true, paths
+          , path, old, erased, ...range } = opts
 
     if (path) {
       range.gt = [explode(path)]
       range.lt = [range.gt[0].concat(HI)]
     }
 
-    let prev = [];
+    range.keys = true // Always read keys
+    range.values = values
 
-    return pump
-      ( this.props.readStream({ keys: true, values, ...range }) // Always read keys
-      , through2.obj(function(kv, _, next) {
-          const key = values ? kv.key : kv
+    let prev = []
+      , props = this.props
+      , iter = props.iterator(range)
 
-          if (!old) { // Skip same (older) paths (TODO: skip ahead)
-            if (pathEquals(key[0], prev)) return next()
-            else prev = key[0]
+    return {
+      next: function(cb) {
+        const handle = function(err, key, value) {
+          if (err || key === undefined) return cb(err)
+
+          if (!old) { // Skip same (older) paths
+            if (pathEquals(key[0], prev)) {
+              iter.end(noop)
+
+              // Skip ahead to next path
+              // TODO: this should be done natively with iterator#seek. also, in
+              // the JS world, the iterator might have cached entries, of which
+              // some might satisfy the next range (if they do, we can keep using
+              // the same iterator).
+              range.gt = [prev, HI]
+              return (iter = props.iterator(range)).next(handle)
+            }
+
+            prev = key[0]
           }
 
-          if (key[3] && !erased) next()
-          else if (values && keys) next(null, kv)
-          else if (keys) next(null, key)
-          else next(null, kv.value)
-        })
-      )
+          if (key[3] && !erased) return iter.next(handle)
+
+          cb(null, paths ? key[0] : keys ? key : null, values ? value : null)
+        }
+
+        iter.next(handle)
+      },
+
+      end: function(cb) {
+        iter.end(cb)
+      }
+    }
+  }
+
+  readStream(opts = {}) {
+    const { keys = true, values = true } = opts
+    const decoder = keys && values ? void 0 : keys ? keyOnly : valueOnly
+    return iteratorStream(this.iterator(opts), { decoder, ...opts })
   }
 
   // TODO: support patch.type = del for level* compatibility
@@ -459,6 +490,8 @@ SpaceShuttle.prototype.createReadStream = SpaceShuttle.prototype.readStream
 SpaceShuttle.prototype.createWriteStream = SpaceShuttle.prototype.writeStream
 SpaceShuttle.prototype.createStream = SpaceShuttle.prototype.replicate
 
+SpaceShuttle.pathEquals = pathEquals
+
 function explode(path) {
   if (typeof path === 'number') return [path]
   else if (typeof path === 'string') return path.split(SEP)
@@ -481,6 +514,9 @@ function pathEquals(a, b) {
 function notFound(k) {
   return new NotFoundError('Key not found in database [' + join(k) + ']')
 }
+
+function keyOnly(key) { return key }
+function valueOnly(_, value) { return value }
 
 // Taken from dc's scuttlebutt
 function validate (data) {
