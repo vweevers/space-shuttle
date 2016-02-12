@@ -1,25 +1,42 @@
 const tape = require('tape')
-    , mem = require('test-level')({ mem: true, clean: true })
-    , disk = require('test-level')('space-shuttle/*', { clean: true })
     , same = require('./util/collect').same
     , after = require('after')
     , eos = require('end-of-stream')
     , Model = require('scuttlebutt/model')
     , createStream = require('wrap-scuttlebutt-stream')
-    , proxyquire = require('proxyquire')
     , timestamp = require('monotonic-timestamp')
     , timestampSpy = []
-    , space = proxyquire('../', {
-        'monotonic-timestamp': function() {
-          const ts = timestamp()
-          timestampSpy.push(ts)
-          timestampSpy.splice(100, timestampSpy.length) // trim
-          return ts
-        }
-    })
+    , spyTimestamp = function() {
+        const ts = timestamp()
+        timestampSpy.push(ts)
+        timestampSpy.splice(100, timestampSpy.length) // trim
+        return ts
+      }
+    , space_ = require('../')
+    , space = function(id, db, opts = {}) {
+        return space_(id, db, { ...opts, timestamp: spyTimestamp })
+      }
 
-run('memdown', mem)
-run('leveldown', disk)
+if (process.title === 'browser') {
+  const levelup = require('levelup')
+      , leveljs = require('level-js')
+      , memdown = require('memdown')
+
+  run('leveljs', function() {
+    return levelup(''+timestamp(), { db: leveljs })
+  })
+
+  run('memdown', function() {
+    return levelup(''+timestamp(), { db: memdown })
+  })
+} else {
+  // TODO: make test-level browser compatible
+  const mem = require('test-level')({ mem: true, clean: true })
+      , disk = require('test-level')('space-shuttle/*', { clean: true })
+
+  run('memdown', mem)
+  run('leveldown', disk)
+}
 
 function run(adapter, factory) {
   const test = function(name, opts, cb) {
@@ -36,6 +53,13 @@ function run(adapter, factory) {
       cb(t, ...args)
     })
   }
+
+  test('open', (t) => {
+    const db = space('test-id', factory())
+    t.plan(1)
+    if (db.ready) t.ok(true, 'already open')
+    else db.on('ready', () => t.ok(true, 'ready'))
+  })
 
   test('basic', (t) => {
     const db = space('test-id', factory())

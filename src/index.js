@@ -2,6 +2,7 @@
 
 const bytespace = require('bytespace')
     , bytewise = require('bytewise-core')
+    , bytewiseHex = require('bytewise/encoding/hex')
     , through2 = require('through2')
     , t = require('mini-type-assert')
     , Emitter = require('events').EventEmitter
@@ -40,13 +41,18 @@ class SpaceShuttle extends Emitter {
       throw new Error('A source ID is required')
     }
 
+    // For test purposes (because proxyquireify broke browser tests)
+    this.timestamp = opts.timestamp || timestamp
+
     this.id = id
     this.setMaxListeners(Number.MAX_VALUE)
     this.future = fastFuture()
 
     // Create root namespace
     this.db = bytespace(db, opts.ns || 'space-shuttle', {
-      keyEncoding: bytewise, valueEncoding: 'json'
+      keyEncoding: bytewiseHex,
+      valueEncoding: 'json',
+      hexNamespace: true
     })
 
     // For traversal. Ordered by path, newest first, source:
@@ -393,7 +399,7 @@ class SpaceShuttle extends Emitter {
 
     patchLoop: for(let i=0, l=patches.length; i<l; i++) {
       const patch = patches[i]
-        , { source = defSource, ts = timestamp(), value } = patch
+        , { source = defSource, ts = this.timestamp(), value } = patch
           , path = explode(patch.path == null ? patch.key : patch.path)
           , erased = value == null || patch.erased === true
 
