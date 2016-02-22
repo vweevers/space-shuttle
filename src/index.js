@@ -15,7 +15,7 @@ const bytespace = require('bytespace')
     , NotFoundError = require('level-errors').NotFoundError
     , probe = require('level-probe')
     , duplexify = require('duplexify')
-    , Stream = require('stream-wrapper')
+    , writer = require('flush-write-stream')
     , autobind = require('autobind-decorator')
     , skipStream = require('./skip-stream')
     , batchStream = require('./batch-stream')
@@ -186,7 +186,7 @@ class SpaceShuttle extends Emitter {
       }).once('error', (err) => { d.dispose(err) }).pipe(out, { end: false })
     }
 
-    d.setWritable(Stream.writable({ objectMode: true }, (data, _, next) => {
+    d.setWritable(writer.obj((data, _, next) => {
       if (Array.isArray(data)) { // It's an update
         if (writable && validate(data)) {
           // TODO: write test to simulate late batch, early stream end
@@ -468,7 +468,7 @@ class SpaceShuttle extends Emitter {
 
     pump(
       this.readStream({ path }),
-      Stream.writable({ objectMode: true }, function({ key, value }, _, next){
+      writer.obj(function({ key, value }, _, next){
         let path = key[0].slice(prefixLength), node = root
 
         if (!path.length) path.push('_')

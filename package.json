@@ -36,6 +36,7 @@
     "duplexify": "~3.4.2",
     "end-of-stream": "~1.1.0",
     "fast-future": "~1.0.1",
+    "flush-write-stream": "~1.0.0",
     "kindof": "~2.0.0",
     "level-errors": "~1.0.4",
     "level-iterator": "0.0.1",
@@ -48,7 +49,6 @@
     "pumpify": "~1.3.3",
     "readable-stream": "^2.0.0",
     "sorted": "~0.1.1",
-    "stream-wrapper": "~0.1.2",
     "through2": "~2.0.0",
     "wrap-scuttlebutt-stream": "0.0.1"
   },
