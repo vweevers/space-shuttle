@@ -472,14 +472,14 @@ function run(adapter, factory) {
       const db1 = space('a', factory())
       const db2 = space('b', factory())
 
-      t.plan(16)
+      t.plan(14)
 
       const stream1 = db1.replicate()
       const stream2 = db2.replicate()
 
       stream1.pipe(stream2).pipe(stream1)
 
-      const next = after(4, function(err){
+      const next = after(2, function(err){
         t.ifError(err, 'no after error')
 
         const ts = timestampSpy.splice(-2, 2)
@@ -506,14 +506,13 @@ function run(adapter, factory) {
         stream2.dispose()
       })
 
-      // Should fire twice: for local put and remote update
-      db1.on('drain', function(){
-        t.ok(true, 'db1 emits drain')
+      stream1.on('persist', function(){
+        t.ok(true, 'stream1 emits persist')
         next()
       })
 
-      db2.on('drain', function(){
-        t.ok(true, 'db2 emits drain')
+      stream2.on('persist', function(){
+        t.ok(true, 'stream2 emits persist')
         next()
       })
 
