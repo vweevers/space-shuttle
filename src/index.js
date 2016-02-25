@@ -10,7 +10,6 @@ const bytespace = require('bytespace')
     , kindOf = require('kindof')
     , eos = require('end-of-stream')
     , pump = require('pump')
-    , pumpify = require('pumpify')
     , fastFuture = require('fast-future')
     , NotFoundError = require('level-errors').NotFoundError
     , probe = require('level-probe')
@@ -103,6 +102,10 @@ class SpaceShuttle extends Emitter {
   }
 
   @autobind close() {
+    if (this.closed) return
+    if (this.queue.length) return this.once('drain', this.close)
+
+    this.closed = true
     this.emit('close')
   }
 
@@ -151,51 +154,69 @@ class SpaceShuttle extends Emitter {
     return skipper.pipe(output, { end: false })
   }
 
-  // Duplex replication stream, adapted from and compatible with
-  // dominictarr's scuttlebutt
-  replicate(opts = {}) {
+  defer(onOpen, onClose) {
+    const start = () => {
+      this.removeListener('close', cancel)
+      this.future(onOpen)
+    }
+
+    const cancel = () => {
+      this.removeListener('ready', start)
+      this.future(onClose)
+    }
+
+    this.once('ready', start)
+    this.once('close', cancel)
+  }
+
+  // Duplex replication stream
+  replicate(opts = {}, _d) {
+    const d = _d || duplexify.obj(null, null, { allowHalfOpen: true, destroy: false })
+    d.name = opts.name
+
+    if (!this.ready) {
+      this.defer(this.replicate.bind(this, opts, d), d.destroy.bind(d))
+      return d
+    }
+
     const writable = opts.writable !== false // default to true
         , readable = opts.readable !== false
         , tail = opts.tail !== false
-        , out = through2.obj({ allowHalfOpen: false })
-        , d = duplexify.obj(null, out, { allowHalfOpen: false, destroy: true })
-
-    d.name = opts.name
 
     let syncRecv = !writable
       , syncSent = !readable
-      , ended = false
-      , finished = false
 
     const sync = () => {
       d.emit('sync')
       if (!tail) this.future(d.dispose)
     }
 
-    const sendHistory = (clock = {}) => {
+    const sendHistory = (clock, cb) => {
       const opts = { compat: true, tail, clock }
 
-      this.historyStream(opts).once('sync', () => {
-        out.write(SYNC_SIGNAL)
+      d.setReadable(this.historyStream(opts).once('sync', () => {
+        d.push(SYNC_SIGNAL)
 
         syncSent = true
         d.emit('syncSent')
 
         // When we have received remote's history
         if (syncRecv) sync()
-      }).once('error', (err) => { d.dispose(err) }).pipe(out, { end: false })
+        if (cb) cb()
+      }))
     }
 
-    d.setWritable(writer.obj((data, _, next) => {
+    const batcher = batchStream(this)
+    const incoming = through2.obj((data, _, next) => {
       if (Array.isArray(data)) { // It's an update
         if (writable && validate(data)) {
           // TODO: write test to simulate late batch, early stream end
-          // TODO: write the initial burst of updates in batches
-          return this.applyScuttlebuttUpdate(data, next)
+          const patch = this.convertScuttlebuttUpdate(data)
+          return next(null, patch)
         }
       } else if ('object' === typeof data && data) { // It's a digest
         if (syncSent) return next()
-        else if (validate.digest(data)) sendHistory(data.clock)
+        else if (validate.digest(data)) return sendHistory(data.clock, next)
         else return next(new Error('Invalid digest'))
       } else if (data === SYNC_SIGNAL) {
         syncRecv = true
@@ -204,61 +225,51 @@ class SpaceShuttle extends Emitter {
       }
 
       next()
-    }))
+    }, function flush(cb){
+      eos(batcher, cb)
+      process.nextTick(batcher.end.bind(batcher))
+    })
 
-    const start = () => {
-      if (ended || finished || d.destroyed) return
+    incoming.pipe(batcher)
+    d.setWritable(incoming)
 
-      // Send my current clock so the other side knows what to send.
-      // Clone the clock, because scuttlebutt mutates this object.
-      const digest = { id: this.id, clock: {...this.memoryClock} }
-      if (opts.meta) digest.meta = opts.meta
-
-      if (readable) {
-        out.write(digest)
-
-        // What's this?
-        if (!writable && !opts.clock) sendHistory()
-      } else if (opts.sendClock) {
-        out.write(digest)
-      }
-    }
-
-    // Way too messy
-    d.dispose = (err) => {
-      this.removeListener('ready', start)
+    const destroy = d.destroy
+    d.dispose = d.destroy = (err) => {
       this.removeListener('close', d.dispose)
+      d.removeListener('finish', d.dispose)
 
-      if (d.destroyed) return
-      if (err) return d.destroy(err)
-      if (!ended) out.end()
+      if (d.disposed) return
+      d.disposed = true
 
-      // duplexify doesn't handle a duplex stream as readable well
-      // or i'm doing something wrong
-      if (finished && !ended) this.future(function(){
-        const state = d._readable._readableState // streams2
-        if (!d.destroyed && !ended && state.ended) {
-          d.emit('end')
-        }
-      })
+      if (d._readable) d._readable.end()
+      if (err) destroy.call(d, err)
     }
 
-    d.once('end', function() { ended = true; d.dispose() })
-    d.once('finish', function() { finished = true; d.dispose() })
+    d.on('finish', d.dispose)
     this.on('close', d.dispose)
 
-    if (this.ready) this.future(start)
-    else this.once('ready', start)
+    // Send my current clock so the other side knows what to send.
+    // Clone the clock, because scuttlebutt mutates this object.
+    const digest = { id: this.id, clock: { ...this.memoryClock } }
+    if (opts.meta) digest.meta = opts.meta
+
+    if (readable) {
+      d.push(digest)
+
+      // What's this?
+      if (!writable && !opts.clock) sendHistory()
+    } else if (opts.sendClock) {
+      d.push(digest)
+    }
 
     return d
   }
 
-  // Compatibility with dc's scuttlebutt/model
-  // TODO: support r-array (object trx)?
-  applyScuttlebuttUpdate(update, cb) {
+  // Temporary compatibility with dc's scuttlebutt/model
+  convertScuttlebuttUpdate(update) {
     const [ trx, ts, source ] = update
     const [ path, value ] = trx
-    this.batch([{ source, ts, path, value }], cb)
+    return { source, ts, path, value }
   }
 
   sublevel(prefix) {
@@ -276,39 +287,61 @@ class SpaceShuttle extends Emitter {
 
     if (!this.writing) {
       this.writing = true
-      this.future(this._nextBatch)
+      this._nextBatch()
     }
   }
 
+  // this is overengineered, but keeping it for now b/c tests rely on it
   @autobind _nextBatch() {
-    if (!this.ready) return this.once('ready', this._nextBatch)
+    if (!this.ready) {
+      return this.defer(this._nextBatch, () => {
+        this.emit('error', new Error('premature close, pending batch'))
+      })
+    }
 
-    const [ patches, cb, options ] = this.queue.shift()
+    const batch = []
+        , props = {}
+        , newClock = {}
+        , callbacks = []
 
-    this._writePatches(patches, options, (err) => {
-      if (cb) cb(err); else if (err) this.emit('error', err)
+    for(let i=0, l=this.queue.length; i<l; i++) {
+      const [ patches, cb, options ] = this.queue[i]
+      if (cb) callbacks.push(cb)
+      this._writePatches(batch, props, newClock, patches, options)
+    }
+
+    this.queue = []
+
+    const next = (err) => {
+      if (callbacks.length) callbacks.forEach(f => f(err))
+      else if (err) this.emit('error', err)
 
       if (!this.queue.length) {
         this.writing = false
-        this.emit('drain')
+        if (batch.length > 0) this.emit('drain')
       } else {
         this._nextBatch()
       }
+    }
+
+    if (batch.length === 0) return this.future(next)
+
+    // Update clocks to latest in batch
+    Object.keys(newClock).forEach(source => {
+      batch.push( { prefix: this.clock, key: source
+                  , value: newClock[source] } )
     })
+
+    this.db.batch(batch, next)
   }
 
   erase(path, cb) {
-    path = explode(path)
-
-    const patches = [];
-    const rs = this.readStream({ path, values: false }).on('data', (key) => {
-      patches.push({ path: key[0], erased: true })
-    })
-
-    eos(rs, (err) => {
-      if (!patches.length || err) cb(err)
-      else this.batch(patches, cb)
-    })
+    pump( this.readStream({ path, values: false })
+        , through2.obj(function(key, _, next){
+            return next(null, { path: key[0], erased: true })
+          })
+        , batchStream(this)
+        , cb)
   }
 
   get(path, opts, cb) {
@@ -357,10 +390,7 @@ class SpaceShuttle extends Emitter {
               iter.end(noop)
 
               // Skip ahead to next path
-              // TODO: this should be done natively with iterator#seek. also, in
-              // the JS world, the iterator might have cached entries, of which
-              // some might satisfy the next range (if they do, we can keep using
-              // the same iterator).
+              // TODO: this should be done natively with iterator#seek.
               range.gt = [prev, HI]
               return (iter = props.iterator(range)).next(handle)
             }
@@ -389,12 +419,9 @@ class SpaceShuttle extends Emitter {
   }
 
   // TODO: support patch.type = del for level* compatibility
-  _writePatches(patches, options = {}, next) {
-    const batch = []
-        , props = {}
-        , newClock = {}
+  _writePatches(batch, props, newClock, patches, options = {}) {
        // For test purposes: if false, old updates are not ignored
-        , filter = options.filter !== false
+    const filter = options.filter !== false
         , defSource = options.source || this.id
 
     patchLoop: for(let i=0, l=patches.length; i<l; i++) {
@@ -443,16 +470,6 @@ class SpaceShuttle extends Emitter {
       batch.push( { prefix: this.props, key: [ path, -ts, source, erased ]
                   , value: erased ? '' : value } )
     }
-
-    if (batch.length === 0) return this.future(next)
-
-    // Update clocks to latest in batch
-    Object.keys(newClock).forEach(source => {
-      batch.push( { prefix: this.clock, key: source
-                  , value: newClock[source] } )
-    })
-
-    this.db.batch(batch, next)
   }
 
   writeStream() {
