@@ -81,7 +81,7 @@ class SpaceShuttle extends Emitter {
       }
     })
 
-    this.queue = []
+    this.pendingBatches = 0
     this.db.on('close', this.close)
 
     if (this.db.isOpen()) this.open()
@@ -103,7 +103,7 @@ class SpaceShuttle extends Emitter {
 
   @autobind close() {
     if (this.closed) return
-    if (this.queue.length) return this.once('drain', this.close)
+    if (this.pendingBatches) return this.once('drain', this.close)
 
     this.closed = true
     this.emit('close')
@@ -207,11 +207,14 @@ class SpaceShuttle extends Emitter {
     }
 
     const batcher = batchStream(this)
+    batcher.on('batch-drain', d.emit.bind(d, 'persist'))
+
     const incoming = through2.obj((data, _, next) => {
       if (Array.isArray(data)) { // It's an update
         if (writable && validate(data)) {
           // TODO: write test to simulate late batch, early stream end
           const patch = this.convertScuttlebuttUpdate(data)
+          if (!this.filter(patch)) return next()
           return next(null, patch)
         }
       } else if ('object' === typeof data && data) { // It's a digest
@@ -225,9 +228,8 @@ class SpaceShuttle extends Emitter {
       }
 
       next()
-    }, function flush(cb){
-      eos(batcher, cb)
-      process.nextTick(batcher.end.bind(batcher))
+    }, function flush(cb) {
+      batcher.flushBatch(cb)
     })
 
     incoming.pipe(batcher)
@@ -265,6 +267,18 @@ class SpaceShuttle extends Emitter {
     return d
   }
 
+  filter(patch) {
+    if (!patch.source) throw new Error('Missing source on patch')
+    if (!patch.ts) throw new Error('Missing timestamp on patch')
+
+    if (this.memoryClock[patch.source] >= patch.ts) {
+      this.emit('old', patch)
+      return false
+    }
+
+    return true
+  }
+
   // Temporary compatibility with dc's scuttlebutt/model
   convertScuttlebuttUpdate(update) {
     const [ trx, ts, source ] = update
@@ -283,45 +297,30 @@ class SpaceShuttle extends Emitter {
   batch(patches, options, cb) {
     if (typeof options === 'function') cb = options, options = {}
 
-    this.queue.push([ patches, cb, options ])
+    this.pendingBatches++
 
-    if (!this.writing) {
-      this.writing = true
-      this._nextBatch()
-    }
-  }
-
-  // this is overengineered, but keeping it for now b/c tests rely on it
-  @autobind _nextBatch() {
     if (!this.ready) {
-      return this.defer(this._nextBatch, () => {
+      return this.defer(() => {
+        this.pendingBatches--
+        this.batch(patches, options, cb)
+      }, () => {
         this.emit('error', new Error('premature close, pending batch'))
       })
     }
 
     const batch = []
-        , props = {}
         , newClock = {}
-        , callbacks = []
 
-    for(let i=0, l=this.queue.length; i<l; i++) {
-      const [ patches, cb, options ] = this.queue[i]
-      if (cb) callbacks.push(cb)
-      this._writePatches(batch, props, newClock, patches, options)
-    }
-
-    this.queue = []
+    this._writePatches(batch, newClock, patches, options)
 
     const next = (err) => {
-      if (callbacks.length) callbacks.forEach(f => f(err))
-      else if (err) this.emit('error', err)
-
-      if (!this.queue.length) {
-        this.writing = false
-        if (batch.length > 0) this.emit('drain')
-      } else {
-        this.future(this._nextBatch)
+      // TODO: rewrite tests to rely on stream.on("persist") instead
+      if (--this.pendingBatches === 0) {
+        this.future(this.emit.bind(this, 'drain'))
       }
+
+      if (cb) cb(err)
+      else if (err) this.emit('error', err)
     }
 
     if (batch.length === 0) return this.future(next)
@@ -420,10 +419,11 @@ class SpaceShuttle extends Emitter {
   }
 
   // TODO: support patch.type = del for level* compatibility
-  _writePatches(batch, props, newClock, patches, options = {}) {
+  _writePatches(batch, newClock, patches, options = {}) {
        // For test purposes: if false, old updates are not ignored
     const filter = options.filter !== false
         , defSource = options.source || this.id
+        , props = {}
 
     patchLoop: for(let i=0, l=patches.length; i<l; i++) {
       const patch = patches[i]
