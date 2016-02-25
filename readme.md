@@ -9,6 +9,7 @@
 - Nested data; construct object graphs of any size
 - Retains full history. Data can't be truly deleted, but you can *erase* data. Erasing is like saying: "Forget that value I sent in an earlier update".
 - Streaming replication with eventual consistency. The only thing it needs to keep in memory is the latest timestamp of each source (just to save unnecessary writes) (even without this, old updates will effectively be ignored because of how the db is ordered).
+- Works with `leveldown` (node), `level.js` (browser) and `memdown` (any)
 - ~~Compatible with [scuttlebutt/model](https://github.com/dominictarr/scuttlebutt)~~
 
 ## missing features
@@ -17,10 +18,12 @@
 - Lists. You can write to `["a", 0]` but not read it out as an array.
 - Sublevels/prefixes/cursors
 - Behavior is undefined if you write values to `["a"]` and a sub-property `["a", "a"]`. One does not invalidate the other.
-- Client-side models. Though `space-shuttle` is unit tested with `memdown >= 1.1.2`, I haven't tried to browserify it.
 - Browsing a certain point in time. You can ask for "newer than x", but not "older than x". It's theoretically possible because `space-shuttle` saves data twice: newest-first (for object graphs) and oldest-first (for replication).
+- Bytespace is the biggest bottleneck right now, maybe I'll switch to a handcoded thing with lexints etc
 
 ## example
+
+*Example is out of date. I'm refactoring to move the drain event to the stream.*
 
 ```js
 const space = require('space-shuttle')
