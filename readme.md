@@ -9,7 +9,7 @@
 - Nested data; construct object graphs of any size
 - Retains full history. Data can't be truly deleted, but you can *erase* data. Erasing is like saying: "Forget that value I sent in an earlier update".
 - Streaming replication with eventual consistency. The only thing it needs to keep in memory is the latest timestamp of each source (just to save unnecessary writes) (even without this, old updates will effectively be ignored because of how the db is ordered).
-- Compatible with [scuttlebutt/model](https://github.com/dominictarr/scuttlebutt)
+- ~~Compatible with [scuttlebutt/model](https://github.com/dominictarr/scuttlebutt)~~
 
 ## missing features
 
