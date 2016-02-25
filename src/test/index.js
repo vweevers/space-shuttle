@@ -472,7 +472,7 @@ function run(adapter, factory) {
       const db1 = space('a', factory())
       const db2 = space('b', factory())
 
-      t.plan(12)
+      t.plan(16)
 
       const stream1 = db1.replicate()
       const stream2 = db2.replicate()
@@ -496,11 +496,9 @@ function run(adapter, factory) {
 
         stream1.once('end', () => t.ok(true, 's1.end called'))
         stream1.once('finish', () => t.ok(true, 's1.finish called'))
-        // stream1.once('close', () => t.ok(true, 's1.close called'))
 
         stream2.once('end', () => t.ok(true, 's2.end called'))
         stream2.once('finish', () => t.ok(true, 's2.finish called'))
-        // stream2.once('close', () => t.ok(true, 's2.close called'))
 
         eos(stream1, function(err) { t.ifError(err, 'no s1 end error') })
         eos(stream2, function(err) { t.ifError(err, 'no s2 end error') })
@@ -509,8 +507,15 @@ function run(adapter, factory) {
       })
 
       // Should fire twice: for local put and remote update
-      db1.on('drain', next)
-      db2.on('drain', next)
+      db1.on('drain', function(){
+        t.ok(true, 'db1 emits drain')
+        next()
+      })
+
+      db2.on('drain', function(){
+        t.ok(true, 'db2 emits drain')
+        next()
+      })
 
       stream1.once('sync', function() {
         t.ok(true, 'emits sync')
@@ -525,7 +530,7 @@ function run(adapter, factory) {
     const db = space('test-id', factory())
     const model = Model('beep')
 
-    t.plan(4)
+    t.plan(6)
 
     const s1 = db.createStream({ wrapper: 'raw' })
         , s2 = model.createStream({ wrapper: 'raw' })
@@ -542,6 +547,11 @@ function run(adapter, factory) {
           t.same(tree, {
             a: { beep: 'boop' }
           })
+
+          eos(s1, function(err){ t.ifError(err, 'no s1 end error') })
+          eos(s2, function(err){ t.ifError(err, 'no s2 end error') })
+
+          s1.end()
         })
       })
     })
