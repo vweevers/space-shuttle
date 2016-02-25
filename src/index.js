@@ -320,19 +320,20 @@ class SpaceShuttle extends Emitter {
         this.writing = false
         if (batch.length > 0) this.emit('drain')
       } else {
-        this._nextBatch()
+        this.future(this._nextBatch)
       }
     }
 
     if (batch.length === 0) return this.future(next)
 
-    // Update clocks to latest in batch
-    Object.keys(newClock).forEach(source => {
-      batch.push( { prefix: this.clock, key: source
-                  , value: newClock[source] } )
+    // Update clocks to latest in batch. Add to beginning, so
+    // that this.memoryClock is updated (with post hook)
+    // before any open historyStreams receive the updates
+    const prepend = Object.keys(newClock).map(source => {
+      return { prefix: this.clock, key: source, value: newClock[source] }
     })
 
-    this.db.batch(batch, next)
+    this.db.batch(prepend.concat(batch), next)
   }
 
   erase(path, cb) {
