@@ -336,12 +336,18 @@ class SpaceShuttle extends Emitter {
   }
 
   erase(path, cb) {
+    const batcher = batchStream(this)
+
     pump( this.readStream({ path, values: false })
-        , through2.obj(function(key, _, next){
+        , through2.obj(function(key, _, next) {
             return next(null, { path: key[0], erased: true })
           })
-        , batchStream(this)
-        , cb)
+        , batcher
+        , function(err){
+            if (err) return cb(err)
+            batcher.flushBatch(cb) // shouldn't be necessary
+          }
+        )
   }
 
   get(path, opts, cb) {
