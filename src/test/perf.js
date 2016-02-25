@@ -11,7 +11,7 @@ test('replicate a lot', (t) => {
   const db1 = space('a', disk())
   const db2 = space('b', disk())
 
-  var max = 1e5, count = 0
+  var max = 6e5, count = 0
 
   profiler.startProfiling()
   insert()
