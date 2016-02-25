@@ -1,54 +1,47 @@
 "use strict";
 
 const through2 = require('through2')
-    , BatchStream = require('batch-stream')
-    , duplexify = require('duplexify')
 
 module.exports = function levelBatchStream(db, opts = {}) {
-  const { silent, size = 100, type, ...batchOpts } = opts
+  const { silent, type, highWaterMark, ...batchOpts,  } = opts
+  const batch = []
 
-  const ws = new BatchStream({ size })
+  let timeout;
 
-  const rs = through2.obj(function(ops, _, next) {
-    doBatch(ops, function(err) {
-      if (err) {
-        dup.emit('batch-error', err, ops)
-        if (!silent) return dup.destroy(err)
-      }
+  const stream = through2.obj({ highWaterMark }, function (op, _, next) {
+    if (type && !op.type) op.type = type
+    batch.push(op)
 
-      next()
-    })
-  })
-
-  function doBatch(ops, next) {
-    if (type) {
-      ops = ops.map(function(op){
-        op.type = op.type || type
-        return op
-      })
+    if (timeout == null) {
+      timeout = setTimeout(function(){
+        timeout = null
+        flushBatch()
+      }, 500)
     }
 
-    db.batch(ops, batchOpts, next)
+    next()
+  }, function flush(cb) {
+    clearTimeout(timeout)
+    timeout = null
+    flushBatch(cb)
+  })
+
+  function flushBatch(cb) {
+    if (batch.length) {
+      const ops = batch.splice(0, batch.length)
+
+      db.batch(ops, batchOpts, function(err) {
+        if (err) {
+          stream.emit('batch-error', err, ops)
+          if (!silent) return stream.destroy(err)
+        }
+
+        cb && cb()
+      })
+    } else {
+      cb && cb()
+    }
   }
 
-  ws.pipe(rs)
-
-  // TODO: use pumpify
-  var dup = duplexify.obj(ws, rs)
-
-  dup.clearBatch = function() {
-    return ws.batch.splice(0, ws.batch.length)
-  }
-
-  dup.getBatch = function() {
-    return ws.batch.slice()
-  }
-
-  // TODO: include ops buffered in rs?
-  dup.flushBatch = function(cb) {
-    const batch = dup.clearBatch()
-    doBatch(batch, cb)
-  }
-
-  return dup
+  return stream
 }
