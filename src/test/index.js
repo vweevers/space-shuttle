@@ -2,6 +2,7 @@ const tape = require('tape')
     , same = require('./util/collect').same
     , after = require('after')
     , eos = require('end-of-stream')
+    , npair = require('n-pair')
     , Model = require('scuttlebutt/model')
     , createStream = require('wrap-scuttlebutt-stream')
     , timestamp = require('monotonic-timestamp')
@@ -16,6 +17,26 @@ const tape = require('tape')
     , space = function(id, db, opts = {}) {
         return space_(id, db, { ...opts, timestamp: spyTimestamp })
       }
+
+const dimensions = {
+    wrapper: [ 'raw', 'json' ]
+  , tail   : [ true, false, 'tail', 'finite' ]
+}
+
+function matrix(...args) {
+  const cb = args.pop()
+  const values = args.map(d => dimensions[d])
+
+  npair(values, function(pair) {
+    const name = pair.map((v,i) => {
+      if (typeof v !== 'boolean') return String(v)
+      const d = args[i]
+      return v ? dimensions[d][2] || d : dimensions[d][3] || 'no-' + d
+    }).join(' ')
+
+    cb(name, ...pair)
+  })
+}
 
 if (process.title === 'browser') {
   const levelup = require('levelup')
@@ -39,19 +60,34 @@ if (process.title === 'browser') {
 }
 
 function run(adapter, factory) {
+  const only = []
+  const names = []
+
   const test = function(name, opts, cb) {
     if (typeof opts === 'function') cb = opts, opts = {}
 
+    if (names.indexOf(name) >=0 ) throw new Error(`"${name}" is not unique`)
+    else names.push(name)
+
     tape(`${adapter} :: ${name}`, opts, function(t, ...args){
+      if (only.length && only.indexOf(name) < 0) {
+        return t.end()
+      }
+
       const test = t.test
 
-      t.test = function subtest(name, opts, cb) {
+      t.test = function subtest(subname, opts, cb) {
         if (typeof opts === 'function') cb = opts, opts = {}
-        test.call(t, `${adapter} :: ${name}`, opts, cb)
+        test.call(t, `${adapter} :: ${name} :: ${subname}`, opts, cb)
       }
 
       cb(t, ...args)
     })
+  }
+
+  test.only = function(name, opts, cb) {
+    only.push(name)
+    test(name, opts, cb)
   }
 
   test('open', (t) => {
@@ -391,11 +427,11 @@ function run(adapter, factory) {
   })
 
   test('replicate', (t) => {
-    t.test('replicate: basic events in objectMode', (t) => {
+    t.test('basic events in objectMode', (t) => {
       const db1 = space('a', factory())
       const db2 = space('b', factory())
 
-      t.plan(8)
+      t.plan(12)
 
       const stream1 = db1.replicate({ wrapper: 'raw', tail: false })
       const stream2 = db2.replicate({ wrapper: 'raw', tail: false })
@@ -410,18 +446,24 @@ function run(adapter, factory) {
 
       stream1.pipe(stream2).pipe(stream1)
 
+      stream1.on('end', function() { t.ok(true, 's1 emits end') })
+      stream1.on('finish', function() { t.ok(true, 's1 emits finish') })
+
+      stream2.on('end', function() { t.ok(true, 's2 emits end') })
+      stream2.on('finish', function() { t.ok(true, 's2 emits finish') })
+
       eos(stream1, function(err) { t.ifError(err, 'no s1 error') })
       eos(stream2, function(err) { t.ifError(err, 'no s2 error') })
     })
 
-    t.test('replicate: basic events in json mode', (t) => {
+    t.test('basic events in tailing objectMode', (t) => {
       const db1 = space('a', factory())
       const db2 = space('b', factory())
 
-      t.plan(8)
+      t.plan(10)
 
-      const stream1 = createStream(db1, { tail: false })
-      const stream2 = createStream(db2, { tail: false })
+      const stream1 = db1.replicate({ wrapper: 'raw', tail: true })
+      const stream2 = db2.replicate({ wrapper: 'raw', tail: true })
 
       stream1.on('sync', () => t.ok(true, 's1 emits sync'))
       stream1.on('syncReceived', () => t.ok(true, 's1 emits syncReceived'))
@@ -433,11 +475,103 @@ function run(adapter, factory) {
 
       stream1.pipe(stream2).pipe(stream1)
 
-      eos(stream1, function(err) { t.ifError(err, 'no s1 error') })
-      eos(stream2, function(err) { t.ifError(err, 'no s2 error') })
+      stream1.on('finish', function() { t.ok(true, 's1 emits finish') })
+      stream2.on('finish', function() { t.ok(true, 's2 emits finish') })
+
+      eos(stream1, {readable:false}, function(err) { t.ifError(err, 'no s1 error') })
+      eos(stream2, {readable:false}, function(err) { t.ifError(err, 'no s2 error') })
+
+      stream1.on('sync', function(){ stream1.end() })
     })
 
-    t.test('replicate: from a to b', (t) => {
+    t.test('basic events in json mode', (t) => {
+      const db1 = space('a', factory())
+      const db2 = space('b', factory())
+
+      t.plan(10)
+
+      const stream1 = createStream(db1, { tail: false, wrapper: 'json' })
+      const stream2 = createStream(db2, { tail: false, wrapper: 'json' })
+
+      stream1.on('sync', () => t.ok(true, 's1 emits sync'))
+      stream1.on('syncReceived', () => t.ok(true, 's1 emits syncReceived'))
+      stream1.on('syncSent', () => t.ok(true, 's1 emits syncSent'))
+
+      stream2.on('sync', () => t.ok(true, 's2 emits sync'))
+      stream2.on('syncReceived', () => t.ok(true, 's2 emits syncReceived'))
+      stream2.on('syncSent', () => t.ok(true, 's2 emits syncSent'))
+
+      stream1.pipe(stream2).pipe(stream1)
+
+      stream1.on('finish', function() { t.ok(true, 's1 emits finish') })
+      stream2.on('finish', function() { t.ok(true, 's2 emits finish') })
+
+      eos(stream1, {readable:false}, function(err) { t.ifError(err, 'no s1 error') })
+      eos(stream2, {readable:false}, function(err) { t.ifError(err, 'no s2 error') })
+    })
+
+    t.test('basic events in tailing json mode', (t) => {
+      const db1 = space('a', factory())
+      const db2 = space('b', factory())
+
+      t.plan(10)
+
+      const stream1 = createStream(db1, { tail: true, wrapper: 'json' })
+      const stream2 = createStream(db2, { tail: true, wrapper: 'json' })
+
+      stream1.on('sync', () => t.ok(true, 's1 emits sync'))
+      stream1.on('syncReceived', () => t.ok(true, 's1 emits syncReceived'))
+      stream1.on('syncSent', () => t.ok(true, 's1 emits syncSent'))
+
+      stream2.on('sync', () => t.ok(true, 's2 emits sync'))
+      stream2.on('syncReceived', () => t.ok(true, 's2 emits syncReceived'))
+      stream2.on('syncSent', () => t.ok(true, 's2 emits syncSent'))
+
+      stream1.pipe(stream2).pipe(stream1)
+
+      stream1.on('finish', function() { t.ok(true, 's1 emits finish') })
+      stream2.on('finish', function() { t.ok(true, 's2 emits finish') })
+
+      eos(stream1, {readable:false}, function(err) { t.ifError(err, 'no s1 error') })
+      eos(stream2, {readable:false}, function(err) { t.ifError(err, 'no s2 error') })
+
+      stream1.on('sync', function() {
+        process.nextTick(stream1.end.bind(stream1))
+      })
+    })
+
+    t.test('basic events in tailing json mode (early double end)', (t) => {
+      const db1 = space('a', factory())
+      const db2 = space('b', factory())
+
+      t.plan(10)
+
+      const stream1 = createStream(db1, { tail: true, wrapper: 'json' })
+      const stream2 = createStream(db2, { tail: true, wrapper: 'json' })
+
+      stream1.on('sync', () => t.ok(true, 's1 emits sync'))
+      stream1.on('syncReceived', () => t.ok(true, 's1 emits syncReceived'))
+      stream1.on('syncSent', () => t.ok(true, 's1 emits syncSent'))
+
+      stream2.on('sync', () => t.ok(true, 's2 emits sync'))
+      stream2.on('syncReceived', () => t.ok(true, 's2 emits syncReceived'))
+      stream2.on('syncSent', () => t.ok(true, 's2 emits syncSent'))
+
+      stream1.pipe(stream2).pipe(stream1)
+
+      stream1.on('finish', function() { t.ok(true, 's1 emits finish') })
+      stream2.on('finish', function() { t.ok(true, 's2 emits finish') })
+
+      eos(stream1, {readable:false}, function(err) { t.ifError(err, 'no s1 error') })
+      eos(stream2, {readable:false}, function(err) { t.ifError(err, 'no s2 error') })
+
+      stream1.on('sync', function() {
+        stream1.end()
+        stream2.end()
+      })
+    })
+
+    t.test('from a to b', (t) => {
       const db1 = space('a', factory())
       const db2 = space('b', factory())
 
@@ -457,9 +591,9 @@ function run(adapter, factory) {
         stream1.pipe(stream2).pipe(stream1)
 
         eos(stream1, function(err) { t.ifError(err, 'no s1 error') })
-        eos(stream2, function(err) {
-          t.ifError(err, 'no s2 error')
+        eos(stream2, function(err) { t.ifError(err, 'no s2 error') })
 
+        stream2.on('sync', function(err) {
           same(t, db2.readStream(), [
             { key: [ [ 'a' ], -ts[0], 'a', false ], value: 1 },
             { key: [ [ 'b', 'b' ], -ts[1], 'a', false ], value: 'beee' }
@@ -468,7 +602,118 @@ function run(adapter, factory) {
       })
     })
 
-    t.test('replicate: live', (t) => {
+    t.test('from b to a', (t) => {
+      const db1 = space('a', factory())
+      const db2 = space('b', factory())
+
+      t.plan(5)
+
+      db2.batch([
+        { key: 'a', value: 1 },
+        { key: 'b.b', value: 'beee' }
+      ], function(err) {
+        t.ifError(err, 'no batch err')
+
+        const ts = timestampSpy.splice(-2, 2)
+
+        const stream1 = db1.replicate({ tail: false })
+        const stream2 = db2.replicate({ tail: false })
+
+        stream1.pipe(stream2).pipe(stream1)
+
+        eos(stream2, function(err) { t.ifError(err, 'no s2 error') })
+        eos(stream1, function(err) {
+          t.ifError(err, 'no s1 error')
+
+          same(t, db1.readStream(), [
+            { key: [ [ 'a' ], -ts[0], 'b', false ], value: 1 },
+            { key: [ [ 'b', 'b' ], -ts[1], 'b', false ], value: 'beee' }
+          ], 'data ok')
+        })
+      })
+    })
+
+    matrix('wrapper', 'tail', function(name, wrapper, tail) {
+      t.test(`from read-only to write-only (${name})`, (t) => {
+        const db1 = space('a', factory())
+        const db2 = space('b', factory())
+
+        t.plan(11)
+
+        db1.batch([
+          { key: 'a', value: 1 },
+          { key: 'b.b', value: 'beee' }
+        ], function(err) {
+          t.ifError(err, 'no batch err')
+
+          const ts = timestampSpy.splice(-2, 2)
+
+          const stream1 = createStream(db1, { tail, wrapper, writable: false })
+          const stream2 = createStream(db2, { tail, wrapper, readable: false })
+
+          if (tail) stream1.on('sync', function(){ stream1.end() })
+
+          stream1.on('sync', () => t.ok(true, 's1 emits sync before end'))
+          stream1.on('syncSent', () => t.ok(true, 's1 emits syncSent'))
+          stream1.on('syncReceived', () => t.ok(true, 's1 emits syncReceived'))
+
+          stream2.on('sync', () => t.ok(true, 's2 emits sync before end'))
+          stream2.on('syncSent', () => t.ok(true, 's2 emits syncSent'))
+          stream2.on('syncReceived', () => t.ok(true, 's2 emits syncReceived'))
+
+          stream1.pipe(stream2).pipe(stream1)
+
+          eos(stream1, {readable:false}, function(err) {
+            t.ifError(err, 'no s1 error')
+          })
+
+          eos(stream2, {readable:false}, function(err) {
+            t.ifError(err, 'no s2 error')
+          })
+
+          stream2.on('sync', function() {
+            same(t, db2.readStream(), [
+              { key: [ [ 'a' ], -ts[0], 'a', false ], value: 1 },
+              { key: [ [ 'b', 'b' ], -ts[1], 'a', false ], value: 'beee' }
+            ], 'data ok')
+          })
+        })
+      })
+    })
+
+    matrix('wrapper', 'tail', function(name, wrapper, tail) {
+      t.test(`from write-only to write-only (${name})`, (t) => {
+        const db1 = space('a', factory())
+        const db2 = space('b', factory())
+
+        t.plan(7)
+
+        db1.batch([
+          { key: 'a', value: 1 },
+          { key: 'b.b', value: 'beee' }
+        ], function(err) {
+          t.ifError(err, 'no batch err')
+
+          // tail is irrelevant, streams should end because there's nothing to do
+          const stream1 = createStream(db1, { tail, wrapper, readable: false })
+          const stream2 = createStream(db2, { tail, wrapper, readable: false })
+
+          stream1.on('sync', () => t.ok(true, 's1 emits sync'))
+          stream2.on('sync', () => t.ok(true, 's2 emits sync'))
+
+          stream1.pipe(stream2).pipe(stream1)
+
+          eos(stream1, function(err) { t.ifError(err, 'no s1 error') })
+          eos(stream2, function(err) { t.ifError(err, 'no s2 error') })
+
+          stream2.on('sync', function(){
+            same(t, db2.readStream(), [], 'data ok')
+          })
+        })
+      })
+    })
+
+    t.test('live', (t) => {
       const db1 = space('a', factory())
       const db2 = space('b', factory())
 
@@ -479,7 +724,7 @@ function run(adapter, factory) {
 
       stream1.pipe(stream2).pipe(stream1)
 
-      const next = after(4, function(err){
+      const next = after(2, function(err){
         t.ifError(err, 'no after error')
 
         const ts = timestampSpy.splice(-2, 2)
@@ -494,23 +739,24 @@ function run(adapter, factory) {
           { key: [ [ 'b' ], -ts[1], 'b', false ], value: 2 }
         ], 'data db2 ok')
 
-        stream1.once('end', () => t.ok(true, 's1.end called'))
-        stream1.once('finish', () => t.ok(true, 's1.finish called'))
-        // stream1.once('close', () => t.ok(true, 's1.close called'))
+        stream1.on('finish', () => t.ok(true, 's1.finish called'))
+        stream2.on('finish', () => t.ok(true, 's2.finish called'))
 
-        stream2.once('end', () => t.ok(true, 's2.end called'))
-        stream2.once('finish', () => t.ok(true, 's2.finish called'))
-        // stream2.once('close', () => t.ok(true, 's2.close called'))
+        eos(stream1, {readable:false}, function(err) { t.ifError(err, 'no s1 end error') })
+        eos(stream2, {readable:false}, function(err) { t.ifError(err, 'no s2 end error') })
 
-        eos(stream1, function(err) { t.ifError(err, 'no s1 end error') })
-        eos(stream2, function(err) { t.ifError(err, 'no s2 end error') })
-
-        stream2.dispose()
+        stream2.end()
       })
 
-      // Should fire twice: for local put and remote update
-      db1.on('drain', next)
-      db2.on('drain', next)
+      stream1.on('commit', function(){
+        t.ok(true, 'stream1 emits commit')
+        next()
+      })
+
+      stream2.on('commit', function(){
+        t.ok(true, 'stream2 emits commit')
+        next()
+      })
 
       stream1.once('sync', function() {
         t.ok(true, 'emits sync')
@@ -525,7 +771,7 @@ function run(adapter, factory) {
     const db = space('test-id', factory())
     const model = Model('beep')
 
-    t.plan(4)
+    t.plan(6)
 
     const s1 = db.createStream({ wrapper: 'raw' })
         , s2 = model.createStream({ wrapper: 'raw' })
@@ -534,14 +780,19 @@ function run(adapter, factory) {
       t.ok(true, 'emits sync')
 
       model.set('a', { beep: 'boop' })
-      db.on('drain', function() {
-        t.ok(true, 'drained')
+      s1.on('commit', function() {
+        t.ok(true, 'committed')
 
         db.tree(function(err, tree){
           t.ifError(err, 'no error')
           t.same(tree, {
             a: { beep: 'boop' }
           })
+
+          eos(s1, function(err){ t.ifError(err, 'no s1 end error') })
+          eos(s2, function(err){ t.ifError(err, 'no s2 end error') })
+
+          s1.end()
         })
       })
     })
@@ -560,8 +811,9 @@ function run(adapter, factory) {
       t.ok(true, 'emits sync')
 
       model.set('a', { beep: 'boop' })
-      db.on('drain', function() {
-        t.ok(true, 'drained')
+
+      s1.on('commit', function() {
+        t.ok(true, 'committed')
 
         db.tree(function(err, tree){
           t.ifError(err, 'no error')
@@ -569,6 +821,8 @@ function run(adapter, factory) {
             a: { beep: 'boop' }
           })
         })
+
+        s1.end()
       })
     })
   })

@@ -10,7 +10,6 @@ const bytespace = require('bytespace')
     , kindOf = require('kindof')
     , eos = require('end-of-stream')
     , pump = require('pump')
-    , pumpify = require('pumpify')
     , fastFuture = require('fast-future')
     , NotFoundError = require('level-errors').NotFoundError
     , probe = require('level-probe')
@@ -21,6 +20,7 @@ const bytespace = require('bytespace')
     , batchStream = require('./batch-stream')
     , liveStream = require('./live-stream')
     , iteratorStream = require('level-iterator-stream')
+    , merge2 = require('merge2')
     , noop = function() {}
 
 const LO = bytewise.bound.lower()
@@ -28,6 +28,7 @@ const LO = bytewise.bound.lower()
 
 const SEP = '.'
     , SYNC_SIGNAL = 'SYNC'
+    , READONLY_SIGNAL = 'READONLY'
 
 module.exports = function factory(id, db, opts) {
   return new SpaceShuttle(id, db, opts)
@@ -71,7 +72,7 @@ class SpaceShuttle extends Emitter {
     this.memoryClock = Object.create(null)
 
     // Install a hook to insert and clean up inverse props
-    this.props.pre((op, add) => {
+    this.unhookPre = this.props.pre((op, add) => {
       const { type, key: [ path, neg, source, erased ], value } = op
       const inverseKey = [ source, -neg, path, erased ]
 
@@ -82,9 +83,7 @@ class SpaceShuttle extends Emitter {
       }
     })
 
-    this.queue = []
     this.db.on('close', this.close)
-
     if (this.db.isOpen()) this.open()
     else this.db.once('open', this.open)
   }
@@ -97,21 +96,26 @@ class SpaceShuttle extends Emitter {
       // Scuttlebutt streams and batches are deferred until now
       this.ready = true
       this.emit('ready')
-    }).once('error', this.emit.bind(this, 'error'))
+    }).once('error', this.errback)
 
     this.once('close', s.end.bind(s))
   }
 
   @autobind close() {
-    this.emit('close')
+    if (!this.closed) {
+      this.unhookPre()
+      this.closed = true
+      this.emit('close')
+    }
   }
 
   // Read history since clock<source, ts>
+  // TODO: test that s.end() removes the hook
   historyStream(opts) {
     const { tail = false, compat = true } = opts || {}
     const clock = opts && opts.clock ? { ...opts.clock } : {} // Clone, b/c we mutate
 
-    const output = through2.obj(function({ key, value }, _, next) {
+    const outer = through2.obj(function({ key, value }, _, next) {
       const [ source, ts, path, erased ] = key
 
       if (compat) { // Convert to dc's scuttlebutt format
@@ -124,141 +128,180 @@ class SpaceShuttle extends Emitter {
 
     // Stream sorted by timestamps, then sources
     const skipper = skipStream(this.inverse, this.clock, { clock })
+    const streams = [skipper]
 
-    eos(skipper, (err) => {
-      if (err) return output.destroy(err)
+    eos(skipper, { readable: true, writable: false }, (err) => {
+      if (err) outer.destroy(err)
+      else outer.emit('sync')
+    })
 
-      if (!tail) {
-        output.emit('sync')
-        return this.future(output.end.bind(output))
-      }
+    if (tail) {
+      const live = liveStream(this.inverse, { old: false, tail: true })
 
       // Skip updates if remote already has them
-      const filter = through2.obj(function(kv, _, next) {
+      streams.push(live.pipe(through2.obj(function filter(kv, _, next) {
         const [ source, ts ] = kv.key
         if (clock[source] && clock[source] >= ts) return next()
         else clock[source] = ts
         next(null, kv)
-      })
+      })))
+    }
 
-      pump( liveStream(this.inverse, { old: false, tail: true })
-          , filter
-          , output )
-
-      output.emit('sync')
-    })
-
-    return skipper.pipe(output, { end: false })
+    return merge2(...streams, { objectMode: true, end: false })
+      .on('queueDrain', () => this.future(outer.end.bind(outer))) // Delay end
+      .pipe(outer)
   }
 
-  // Duplex replication stream, adapted from and compatible with
-  // dominictarr's scuttlebutt
-  replicate(opts = {}) {
-    const writable = opts.writable !== false // default to true
+  defer(onOpen, onClose) {
+    const open = () => {
+      if (onClose) this.removeListener('close', close)
+      this.future(onOpen)
+    }
+
+    const close = () => {
+      if (onOpen) this.removeListener('ready', open)
+      this.future(onClose)
+    }
+
+    if (onOpen) this.once('ready', open)
+    if (onClose) this.once('close', close)
+  }
+
+  // Duplex replication stream
+  replicate(opts = {}, _d) {
+    const d = _d || duplexify.obj(null, null, { allowHalfOpen: true, destroy: false })
+    d.name = opts.name || ('replicate_' + this.id)
+
+    if (!this.ready) {
+      this.defer(this.replicate.bind(this, opts, d), () => { d.destroy() })
+      return d
+    }
+
+    // Default to true
+    const writable = opts.writable !== false
         , readable = opts.readable !== false
         , tail = opts.tail !== false
-        , out = through2.obj({ allowHalfOpen: false })
-        , d = duplexify.obj(null, out, { allowHalfOpen: false, destroy: true })
 
-    d.name = opts.name
+    let syncRecv = false
+      , syncSent = false
 
-    let syncRecv = !writable
-      , syncSent = !readable
-      , ended = false
-      , finished = false
-
-    const sync = () => {
-      d.emit('sync')
-      if (!tail) this.future(d.dispose)
-    }
-
-    const sendHistory = (clock = {}) => {
+    // We're readable and other side is writable
+    const sendHistory = (clock, next) => {
       const opts = { compat: true, tail, clock }
 
-      this.historyStream(opts).once('sync', () => {
-        out.write(SYNC_SIGNAL)
-
-        syncSent = true
-        d.emit('syncSent')
-
-        // When we have received remote's history
-        if (syncRecv) sync()
-      }).once('error', (err) => { d.dispose(err) }).pipe(out, { end: false })
+      d.setReadable(this.historyStream(opts).once('sync', () => {
+        sync('send')
+        next()
+      }))
     }
 
-    d.setWritable(writer.obj((data, _, next) => {
-      if (Array.isArray(data)) { // It's an update
-        if (writable && validate(data)) {
-          // TODO: write test to simulate late batch, early stream end
-          // TODO: write the initial burst of updates in batches
-          return this.applyScuttlebuttUpdate(data, next)
-        }
-      } else if ('object' === typeof data && data) { // It's a digest
-        if (syncSent) return next()
-        else if (validate.digest(data)) sendHistory(data.clock)
-        else return next(new Error('Invalid digest'))
-      } else if (data === SYNC_SIGNAL) {
-        syncRecv = true
-        d.emit('syncReceived')
-        if (syncSent) sync()
-      }
+    // We're not readable or other side is not writable
+    const skipHistory = (isVoid, cb) => {
+      process.nextTick(() => {
+        sync('send')
 
-      next()
-    }))
+        // End if both sides are not writable
+        if (isVoid || !tail) d.setReadable(null)
+        else d.setReadable(through2.obj())
 
-    const start = () => {
-      if (ended || finished || d.destroyed) return
-
-      // Send my current clock so the other side knows what to send.
-      // Clone the clock, because scuttlebutt mutates this object.
-      const digest = { id: this.id, clock: {...this.memoryClock} }
-      if (opts.meta) digest.meta = opts.meta
-
-      if (readable) {
-        out.write(digest)
-
-        // What's this?
-        if (!writable && !opts.clock) sendHistory()
-      } else if (opts.sendClock) {
-        out.write(digest)
-      }
-    }
-
-    // Way too messy
-    d.dispose = (err) => {
-      this.removeListener('ready', start)
-      this.removeListener('close', d.dispose)
-
-      if (d.destroyed) return
-      if (err) return d.destroy(err)
-      if (!ended) out.end()
-
-      // duplexify doesn't handle a duplex stream as readable well
-      // or i'm doing something wrong
-      if (finished && !ended) this.future(function(){
-        const state = d._readable._readableState // streams2
-        if (!d.destroyed && !ended && state.ended) {
-          d.emit('end')
-        }
+        cb && cb()
       })
     }
 
-    d.once('end', function() { ended = true; d.dispose() })
-    d.once('finish', function() { finished = true; d.dispose() })
-    this.on('close', d.dispose)
+    // Handle signals and updates
+    const batcher = batchStream(this, (data, next) => {
+      if (Array.isArray(data)) { // It's an update
+        if (!writable) next(new Error('Not writable'))
+        else if (!validate(data)) next(new Error('Invalid update'))
+        else {
+          const patch = this.convertScuttlebuttUpdate(data)
+          return this.filter(patch) ? next(null, patch) : next()
+        }
+      } else if ('object' === typeof data && data) { // It's a digest
+        if (syncSent) next(new Error('Sync signal already sent'))
+        else if (!readable) skipHistory(true, next)
+        else if (validate.digest(data)) sendHistory(data.clock, next)
+        else next(new Error('Invalid digest'))
+      } else if (data === SYNC_SIGNAL) {
+        if (syncRecv) next(new Error('Sync signal already received'))
+        else sync('receive', next)
+      } else if (data === READONLY_SIGNAL) {
+        skipHistory(false, next)
+      } else {
+        next(new Error('Invalid data'))
+      }
+    })
 
-    if (this.ready) this.future(start)
-    else this.once('ready', start)
+    d.setWritable(batcher.on('commit', d.emit.bind(d, 'commit')))
+
+    function sync(direction, cb) {
+      if (direction === 'send') {
+        d.push(SYNC_SIGNAL)
+        syncSent = true
+        d.emit('syncSent')
+      } else {
+        syncRecv = true
+        d.emit('syncReceived')
+      }
+
+      if (syncSent && syncRecv) {
+        batcher.commit(() => {
+          // Fully consumed each other's history. Switch to tick batching
+          batcher.setWindow(1)
+          d.emit('sync')
+        })
+      }
+
+      if (cb) cb()
+    }
+
+    const destroy = d.destroy
+    const onclose = d.end.bind(d)
+
+    // Make sure the readable side ends
+    const dispose = d.destroy = (err) => {
+      this.removeListener('close', onclose)
+      d.removeListener('finish', dispose)
+
+      if (d.disposed) return
+      d.disposed = true
+
+      if (d._readable) d._readable.end()
+      if (err) destroy.call(d, err)
+    }
+
+    d.on('finish', dispose)
+    this.on('close', onclose)
+
+    if (writable) {
+      // Send my current clock so the other side knows what to send.
+      const digest = { id: this.id, clock: { ...this.memoryClock } }
+      if (opts.meta) digest.meta = opts.meta
+      d.push(digest)
+    } else {
+      d.push(READONLY_SIGNAL)
+    }
 
     return d
   }
 
-  // Compatibility with dc's scuttlebutt/model
-  // TODO: support r-array (object trx)?
-  applyScuttlebuttUpdate(update, cb) {
+  filter(patch) {
+    if (!patch.source) throw new Error('Missing source on patch')
+    if (!patch.ts) throw new Error('Missing timestamp on patch')
+
+    if (this.memoryClock[patch.source] >= patch.ts) {
+      this.emit('old', patch)
+      return false
+    }
+
+    return true
+  }
+
+  // Temporary compatibility with dc's scuttlebutt/model
+  convertScuttlebuttUpdate(update) {
     const [ trx, ts, source ] = update
     const [ path, value ] = trx
-    this.batch([{ source, ts, path, value }], cb)
+    return { source, ts, path, value }
   }
 
   sublevel(prefix) {
@@ -272,43 +315,35 @@ class SpaceShuttle extends Emitter {
   batch(patches, options, cb) {
     if (typeof options === 'function') cb = options, options = {}
 
-    this.queue.push([ patches, cb, options ])
-
-    if (!this.writing) {
-      this.writing = true
-      this.future(this._nextBatch)
+    if (!this.ready) {
+      return this.defer(() => { this.batch(patches, options, cb) })
     }
+
+    const batch = [], newClock = {}
+    this._writePatches(batch, newClock, patches, options)
+    if (batch.length === 0) return cb && this.future(cb)
+
+    // Update clocks to latest in batch. Add to beginning, so
+    // that this.memoryClock is updated (with post hook)
+    // before any open historyStreams receive the updates
+    const prepend = Object.keys(newClock).map(source => {
+      return { prefix: this.clock, key: source, value: newClock[source] }
+    })
+
+    this.db.batch(prepend.concat(batch), cb || this.errback)
   }
 
-  @autobind _nextBatch() {
-    if (!this.ready) return this.once('ready', this._nextBatch)
-
-    const [ patches, cb, options ] = this.queue.shift()
-
-    this._writePatches(patches, options, (err) => {
-      if (cb) cb(err); else if (err) this.emit('error', err)
-
-      if (!this.queue.length) {
-        this.writing = false
-        this.emit('drain')
-      } else {
-        this._nextBatch()
-      }
-    })
+  @autobind errback(err) {
+    if (err) this.emit('error', err)
   }
 
   erase(path, cb) {
-    path = explode(path)
-
-    const patches = [];
-    const rs = this.readStream({ path, values: false }).on('data', (key) => {
-      patches.push({ path: key[0], erased: true })
-    })
-
-    eos(rs, (err) => {
-      if (!patches.length || err) cb(err)
-      else this.batch(patches, cb)
-    })
+    pump( this.readStream({ path, values: false })
+        , through2.obj(function(key, _, next) {
+            return next(null, { path: key[0], erased: true })
+          })
+        , batchStream(this)
+        , cb )
   }
 
   get(path, opts, cb) {
@@ -348,35 +383,34 @@ class SpaceShuttle extends Emitter {
       , iter = props.iterator(range)
 
     return {
-      next: function(cb) {
-        const handle = function(err, key, value) {
+      next: function outerNext(cb) {
+        function innerNext(err, key, value) {
           if (err || key === undefined) return cb(err)
 
           if (!old) { // Skip same (older) paths
             if (pathEquals(key[0], prev)) {
-              iter.end(noop)
+              return iter.end(function innerEnd(err) {
+                if (err) return cb(err)
 
-              // Skip ahead to next path
-              // TODO: this should be done natively with iterator#seek. also, in
-              // the JS world, the iterator might have cached entries, of which
-              // some might satisfy the next range (if they do, we can keep using
-              // the same iterator).
-              range.gt = [prev, HI]
-              return (iter = props.iterator(range)).next(handle)
+                // Skip ahead to next path
+                // TODO: this should be done natively with iterator#seek.
+                range.gt = [prev, HI]
+                return (iter = props.iterator(range)).next(innerNext)
+              })
             }
 
             prev = key[0]
           }
 
-          if (key[3] && !erased) return iter.next(handle)
+          if (key[3] && !erased) return iter.next(innerNext)
 
           cb(null, paths ? key[0] : keys ? key : null, values ? value : null)
         }
 
-        iter.next(handle)
+        iter.next(innerNext)
       },
 
-      end: function(cb) {
+      end: function outerEnd(cb) {
         iter.end(cb)
       }
     }
@@ -389,13 +423,11 @@ class SpaceShuttle extends Emitter {
   }
 
   // TODO: support patch.type = del for level* compatibility
-  _writePatches(patches, options = {}, next) {
-    const batch = []
-        , props = {}
-        , newClock = {}
+  _writePatches(batch, newClock, patches, options = {}) {
        // For test purposes: if false, old updates are not ignored
-        , filter = options.filter !== false
+    const filter = options.filter !== false
         , defSource = options.source || this.id
+        , props = {}
 
     patchLoop: for(let i=0, l=patches.length; i<l; i++) {
       const patch = patches[i]
@@ -419,7 +451,7 @@ class SpaceShuttle extends Emitter {
         }
       }
 
-      if (typeof ts !== 'number' || typeof source !== 'string') {
+      if (typeof ts !== 'number' || ts <= 0 || typeof source !== 'string') {
         this.emit('invalid', { path, ts, source, value, erased })
         continue
       }
@@ -443,16 +475,6 @@ class SpaceShuttle extends Emitter {
       batch.push( { prefix: this.props, key: [ path, -ts, source, erased ]
                   , value: erased ? '' : value } )
     }
-
-    if (batch.length === 0) return this.future(next)
-
-    // Update clocks to latest in batch
-    Object.keys(newClock).forEach(source => {
-      batch.push( { prefix: this.clock, key: source
-                  , value: newClock[source] } )
-    })
-
-    this.db.batch(batch, next)
   }
 
   writeStream() {

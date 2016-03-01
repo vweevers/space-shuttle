@@ -1,6 +1,6 @@
 # space-shuttle
 
-**Work in progress append-only scuttlebutt db with nested data.**
+**Work in progress append-only scuttlebutt db with nested data. Requires node >= 0.12.**
 
 [![npm status](http://img.shields.io/npm/v/space-shuttle.svg?style=flat-square)](https://www.npmjs.org/package/space-shuttle) [![Travis build status](https://img.shields.io/travis/vweevers/space-shuttle.svg?style=flat-square&label=travis)](http://travis-ci.org/vweevers/space-shuttle) [![AppVeyor build status](https://img.shields.io/appveyor/ci/vweevers/space-shuttle.svg?style=flat-square&label=appveyor)](https://ci.appveyor.com/project/vweevers/space-shuttle) [![Dependency status](https://img.shields.io/david/vweevers/space-shuttle.svg?style=flat-square)](https://david-dm.org/vweevers/space-shuttle)
 
@@ -8,8 +8,9 @@
 
 - Nested data; construct object graphs of any size
 - Retains full history. Data can't be truly deleted, but you can *erase* data. Erasing is like saying: "Forget that value I sent in an earlier update".
-- Streaming replication with eventual consistency. The only thing it needs to keep in memory is the latest timestamp of each source (just to save unnecessary writes) (even without this, old updates will effectively be ignored because of how the db is ordered).
-- Compatible with [scuttlebutt/model](https://github.com/dominictarr/scuttlebutt)
+- Streaming replication with eventual consistency. The only thing it needs to keep in memory is the latest timestamp of each source (to save unnecessary writes) (even without this, old updates will effectively be ignored because of how the db is ordered).
+- Tested in Node.js (0.12, 4 and 5) and Google Chrome with `leveldown` (node), a fork of `level.js` (Chrome) and `memdown` (both). Note: in the browser I've seen a CPU usage of ~25%, during the initial sync of 60.000+ items.
+- ~~Compatible with [scuttlebutt/model](https://github.com/dominictarr/scuttlebutt)~~
 
 ## missing features
 
@@ -17,10 +18,12 @@
 - Lists. You can write to `["a", 0]` but not read it out as an array.
 - Sublevels/prefixes/cursors
 - Behavior is undefined if you write values to `["a"]` and a sub-property `["a", "a"]`. One does not invalidate the other.
-- Client-side models. Though `space-shuttle` is unit tested with `memdown >= 1.1.2`, I haven't tried to browserify it.
 - Browsing a certain point in time. You can ask for "newer than x", but not "older than x". It's theoretically possible because `space-shuttle` saves data twice: newest-first (for object graphs) and oldest-first (for replication).
+- Bytespace is the biggest bottleneck right now, maybe I'll switch to a handcoded thing with lexints etc
 
 ## example
+
+*Example is out of date. I moved the `drain` event from the db to the stream, as `commit`. This way, streams can't block each other. The `sync` event means the initial sync is done (and committed), `commit` means subsequent updates have been committed.*
 
 ```js
 const space = require('space-shuttle')

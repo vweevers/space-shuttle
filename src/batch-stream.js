@@ -1,54 +1,85 @@
 "use strict";
 
-const through2 = require('through2')
-    , BatchStream = require('batch-stream')
-    , duplexify = require('duplexify')
+const writer = require('flush-write-stream')
 
-module.exports = function levelBatchStream(db, opts = {}) {
-  const { silent, size = 100, type, ...batchOpts } = opts
+module.exports = function BatchStream (db, opts, map) {
+  if (typeof opts === 'function') map = opts, opts = {}
+  else if (!opts) opts = {}
 
-  const ws = new BatchStream({ size })
+  let batching = false, scheduled = false, draining = false, finished = false;
+  let window_ = opts.window && opts.window > 0 ? opts.window : 50
 
-  const rs = through2.obj(function(ops, _, next) {
-    doBatch(ops, function(err) {
-      if (err) {
-        dup.emit('batch-error', err, ops)
-        if (!silent) return dup.destroy(err)
-      }
+  // Using flush-write-stream instead of through2, because we
+  // need an asynchronous flush on the writable side (before
+  // finish is emitted) instead of on the readable side.
+  const highWaterMark = opts.highWaterMark || 16
+  const w = writer.obj({ highWaterMark }, map ? mapped : write, flush)
+  const batch = []
 
-      next()
+  function mapped (data, enc, next) {
+    map(data, function callback (err, op) {
+      if (err) next(err)
+      else if (op === null) next(null, null)
+      else write(op, enc, next)
     })
-  })
+  }
 
-  function doBatch(ops, next) {
-    if (type) {
-      ops = ops.map(function(op){
-        op.type = op.type || type
-        return op
-      })
+  function write (op, enc, next) {
+    if (op) batch.push(op)
+    if (batch.length < window_) return next()
+
+    w.once('commit', next)
+    if (!scheduled) schedule()
+  }
+
+  function schedule () {
+    scheduled = true
+    if (!batching) process.nextTick(commit)
+  }
+
+  function flush (cb) {
+    commit(function done(){
+      finished = true
+      cb()
+    })
+  }
+
+  function commit (cb) {
+    if (finished || w.destroyed) return cb && cb()
+
+    if (cb) {
+      if (!batch.length && !batching) return cb()
+      draining = true
+      w.once('commit', cb)
     }
 
-    db.batch(ops, batchOpts, next)
+    if (!batching) {
+      batching = true
+      db.batch(batch.splice(0, batch.length), opts, function post(err) {
+        if (err) return w.destroy(err)
+
+        batching = false
+
+        if (!batch.length) {
+          draining = false
+          scheduled = false
+          w.emit('commit')
+        } else if (draining || scheduled) {
+          commit()
+        }
+      })
+    }
   }
 
-  ws.pipe(rs)
-
-  // TODO: use pumpify
-  var dup = duplexify.obj(ws, rs)
-
-  dup.clearBatch = function() {
-    return ws.batch.splice(0, ws.batch.length)
+  w.commit = function forceCommit(cb){
+    if (!cb) throw new Error('Missing callback')
+    commit(cb)
   }
 
-  dup.getBatch = function() {
-    return ws.batch.slice()
+  w.setWindow = function setWindow(n) {
+    window_ = n && n > 0 ? n : 1
+    if (!scheduled && batch.length >= window_) schedule()
   }
 
-  // TODO: include ops buffered in rs?
-  dup.flushBatch = function(cb) {
-    const batch = dup.clearBatch()
-    doBatch(batch, cb)
-  }
-
-  return dup
+  return w
 }

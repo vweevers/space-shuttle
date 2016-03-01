@@ -40,18 +40,21 @@ function skipStream(db, clockDb, opts) {
   }
 
   function next(iter) {
+    // TODO: if we have just one iter, there's no need to sort
     iter.next(function(err, key, value){
       if (err) return stream.destroy(err)
 
       if (key === undefined) {
-        if (--distinct.length === 0) { // Flush and end
-          heap.forEach(entry => stream.push(entry[1]))
-          stream.push(null)
-        } else if (heap.length) {
-          stream.pull()
-        }
+        return iter.end(function(err){
+          if (err) return stream.destroy(err)
 
-        return iter.end(noop)
+          if (--distinct.length === 0) { // Flush and end
+            heap.forEach(entry => stream.push(entry[1]))
+            stream.push(null)
+          } else if (heap.length) {
+            stream.pull()
+          }
+        })
       }
 
       try {

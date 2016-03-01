@@ -12,19 +12,29 @@ function liveStream(db, opts = {}) {
   const live = function(err) {
     if (err) return output.destroy(err)
 
-    if (tail) db.post(function(op){
-      if (op.type !== 'del') output.write(op)
-    })
+    if (tail) {
+      let unhook = db.post(function(op){
+        if (op.type !== 'del') output.write(op)
+      })
 
-    future(function() {
-      output.emit('sync')
-      if (!tail) future(output.end.bind(output))
-    })
+      function stop() {
+        if (unhook) unhook()
+        unhook = null
+      }
+
+      output.once('error', stop)
+      output.once('close', stop)
+      output.once('finish', stop)
+      output.once('end', stop)
+    }
+
+    output.emit('sync')
+    if (!tail) future(output.end.bind(output))
   }
 
   if (old) {
     const rs = db.createReadStream()
-    eos(rs, live)
+    eos(rs, { writable: false }, live)
     rs.pipe(output, { end: false })
   } else {
     live()
