@@ -8,8 +8,8 @@
 
 - Nested data; construct object graphs of any size
 - Retains full history. Data can't be truly deleted, but you can *erase* data. Erasing is like saying: "Forget that value I sent in an earlier update".
-- Streaming replication with eventual consistency. The only thing it needs to keep in memory is the latest timestamp of each source (just to save unnecessary writes) (even without this, old updates will effectively be ignored because of how the db is ordered).
-- Works with `leveldown` (node), `level.js` (browser) and `memdown` (any)
+- Streaming replication with eventual consistency. The only thing it needs to keep in memory is the latest timestamp of each source (to save unnecessary writes) (even without this, old updates will effectively be ignored because of how the db is ordered).
+- Tested in Node.js (0.12, 4 and 5) and Google Chrome with `leveldown` (node), a fork of `level.js` (Chrome) and `memdown` (both). The CI test matrix includes node 0.10 too, but there have been random failures. And in the browser I've seen a CPU usage of ~25%, during the initial sync of 60.000+ items.
 - ~~Compatible with [scuttlebutt/model](https://github.com/dominictarr/scuttlebutt)~~
 
 ## missing features
@@ -23,7 +23,7 @@
 
 ## example
 
-*Example is out of date. I'm refactoring to move the drain event to the stream.*
+*Example is out of date. I moved the `drain` event from the db to the stream, as `commit`. This way, streams can't block each other. The `sync` event means the initial sync is done (and committed), `commit` means subsequent updates have been committed.*
 
 ```js
 const space = require('space-shuttle')
