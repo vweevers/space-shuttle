@@ -1,69 +1,85 @@
 "use strict";
 
-const through2 = require('through2')
+const writer = require('flush-write-stream')
 
-module.exports = function levelBatchStream(db, opts = {}) {
-  const { silent, size = 50, type, highWaterMark, ...batchOpts,  } = opts
+module.exports = function BatchStream (db, opts, map) {
+  if (typeof opts === 'function') map = opts, opts = {}
+  else if (!opts) opts = {}
+
+  let batching = false, scheduled = false, draining = false, finished = false;
+  let window_ = opts.window && opts.window > 0 ? opts.window : 50
+
+  // Using flush-write-stream instead of through2, because we
+  // need an asynchronous flush on the writable side (before
+  // finish is emitted) instead of on the readable side.
+  const highWaterMark = opts.highWaterMark || 16
+  const w = writer.obj({ highWaterMark }, map ? mapped : write, flush)
   const batch = []
 
-  let timeout, batching = false, scheduled = false;
+  function mapped (data, enc, next) {
+    map(data, function callback (err, op) {
+      if (err) next(err)
+      else if (op === null) next(null, null)
+      else write(op, enc, next)
+    })
+  }
 
-  const stream = through2.obj({ highWaterMark }, function (op, _, next) {
-    if (type && !op.type) op.type = type
-    batch.push(op)
+  function write (op, enc, next) {
+    if (op) batch.push(op)
+    if (batch.length < window_) return next()
 
-    if (!scheduled) {
-      if (batch.length >= size) {
-        scheduled = true
-        timeout = setTimeout(flushBatch, 0)
-      } else if (timeout == null) {
-        scheduled = true
-        timeout = setTimeout(flushBatch, 500)
-      }
-    }
+    w.once('commit', next)
+    if (!scheduled) schedule()
+  }
 
-    next()
-  }, function flush(cb) {
-    flushBatch(cb, true)
-  })
+  function schedule () {
+    scheduled = true
+    if (!batching) process.nextTick(commit)
+  }
 
-  function flushBatch(cb, force) {
-    scheduled = false
+  function flush (cb) {
+    commit(function done(){
+      finished = true
+      cb()
+    })
+  }
 
-    if (timeout != null) {
-      clearTimeout(timeout)
-      timeout = null
-    }
+  function commit (cb) {
+    if (finished || w.destroyed) return cb && cb()
 
     if (cb) {
-      if (!batch.length && !batching) return process.nextTick(cb)
-      stream.once('batch-drain', cb)
+      if (!batch.length && !batching) return cb()
+      draining = true
+      w.once('commit', cb)
     }
 
-    if (batch.length && !batching) {
+    if (!batching) {
       batching = true
-      const ops = batch.splice(0, batch.length)
+      db.batch(batch.splice(0, batch.length), opts, function post(err) {
+        if (err) return w.destroy(err)
 
-      db.batch(ops, batchOpts, function(err) {
         batching = false
 
-        if (err) {
-          stream.emit('batch-error', err, ops)
-          if (!silent) return stream.destroy(err)
-        }
-
         if (!batch.length) {
-          stream.emit('batch-drain')
-        } else if (force){
-          flushBatch(null, true)
+          draining = false
+          scheduled = false
+          w.emit('commit')
+        } else if (draining || scheduled) {
+          commit()
         }
       })
     }
   }
 
-  stream.flushBatch = function(cb) {
-    flushBatch(cb, true)
+  w.commit = function forceCommit(cb){
+    if (!cb) throw new Error('Missing callback')
+    commit(cb)
   }
 
-  return stream
+  w.setWindow = function setWindow(n) {
+    window_ = n && n > 0 ? n : 1
+    if (!scheduled && batch.length >= window_) schedule()
+  }
+
+  return w
 }
