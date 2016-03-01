@@ -20,6 +20,7 @@ const bytespace = require('bytespace')
     , batchStream = require('./batch-stream')
     , liveStream = require('./live-stream')
     , iteratorStream = require('level-iterator-stream')
+    , merge2 = require('merge2')
     , noop = function() {}
 
 const LO = bytewise.bound.lower()
@@ -27,6 +28,7 @@ const LO = bytewise.bound.lower()
 
 const SEP = '.'
     , SYNC_SIGNAL = 'SYNC'
+    , READONLY_SIGNAL = 'READONLY'
 
 module.exports = function factory(id, db, opts) {
   return new SpaceShuttle(id, db, opts)
@@ -70,7 +72,7 @@ class SpaceShuttle extends Emitter {
     this.memoryClock = Object.create(null)
 
     // Install a hook to insert and clean up inverse props
-    this.props.pre((op, add) => {
+    this.unhookPre = this.props.pre((op, add) => {
       const { type, key: [ path, neg, source, erased ], value } = op
       const inverseKey = [ source, -neg, path, erased ]
 
@@ -81,9 +83,7 @@ class SpaceShuttle extends Emitter {
       }
     })
 
-    this.pendingBatches = 0
     this.db.on('close', this.close)
-
     if (this.db.isOpen()) this.open()
     else this.db.once('open', this.open)
   }
@@ -96,25 +96,26 @@ class SpaceShuttle extends Emitter {
       // Scuttlebutt streams and batches are deferred until now
       this.ready = true
       this.emit('ready')
-    }).once('error', this.emit.bind(this, 'error'))
+    }).once('error', this.errback)
 
     this.once('close', s.end.bind(s))
   }
 
   @autobind close() {
-    if (this.closed) return
-    if (this.pendingBatches) return this.once('drain', this.close)
-
-    this.closed = true
-    this.emit('close')
+    if (!this.closed) {
+      this.unhookPre()
+      this.closed = true
+      this.emit('close')
+    }
   }
 
   // Read history since clock<source, ts>
+  // TODO: test that s.end() removes the hook
   historyStream(opts) {
     const { tail = false, compat = true } = opts || {}
     const clock = opts && opts.clock ? { ...opts.clock } : {} // Clone, b/c we mutate
 
-    const output = through2.obj(function({ key, value }, _, next) {
+    const outer = through2.obj(function({ key, value }, _, next) {
       const [ source, ts, path, erased ] = key
 
       if (compat) { // Convert to dc's scuttlebutt format
@@ -127,118 +128,140 @@ class SpaceShuttle extends Emitter {
 
     // Stream sorted by timestamps, then sources
     const skipper = skipStream(this.inverse, this.clock, { clock })
+    const streams = [skipper]
 
-    eos(skipper, (err) => {
-      if (err) return output.destroy(err)
+    eos(skipper, { readable: true, writable: false }, (err) => {
+      if (err) outer.destroy(err)
+      else outer.emit('sync')
+    })
 
-      if (!tail) {
-        output.emit('sync')
-        return this.future(output.end.bind(output))
-      }
+    if (tail) {
+      const live = liveStream(this.inverse, { old: false, tail: true })
 
       // Skip updates if remote already has them
-      const filter = through2.obj(function(kv, _, next) {
+      streams.push(live.pipe(through2.obj(function filter(kv, _, next) {
         const [ source, ts ] = kv.key
         if (clock[source] && clock[source] >= ts) return next()
         else clock[source] = ts
         next(null, kv)
-      })
+      })))
+    }
 
-      pump( liveStream(this.inverse, { old: false, tail: true })
-          , filter
-          , output )
-
-      output.emit('sync')
-    })
-
-    return skipper.pipe(output, { end: false })
+    return merge2(...streams, { objectMode: true, end: false })
+      .on('queueDrain', () => this.future(outer.end.bind(outer))) // Delay end
+      .pipe(outer)
   }
 
   defer(onOpen, onClose) {
-    const start = () => {
-      this.removeListener('close', cancel)
+    const open = () => {
+      if (onClose) this.removeListener('close', close)
       this.future(onOpen)
     }
 
-    const cancel = () => {
-      this.removeListener('ready', start)
+    const close = () => {
+      if (onOpen) this.removeListener('ready', open)
       this.future(onClose)
     }
 
-    this.once('ready', start)
-    this.once('close', cancel)
+    if (onOpen) this.once('ready', open)
+    if (onClose) this.once('close', close)
   }
 
   // Duplex replication stream
   replicate(opts = {}, _d) {
     const d = _d || duplexify.obj(null, null, { allowHalfOpen: true, destroy: false })
-    d.name = opts.name
+    d.name = opts.name || ('replicate_' + this.id)
 
     if (!this.ready) {
-      this.defer(this.replicate.bind(this, opts, d), d.destroy.bind(d))
+      this.defer(this.replicate.bind(this, opts, d), () => { d.destroy() })
       return d
     }
 
-    const writable = opts.writable !== false // default to true
+    // Default to true
+    const writable = opts.writable !== false
         , readable = opts.readable !== false
         , tail = opts.tail !== false
 
-    let syncRecv = !writable
-      , syncSent = !readable
+    let syncRecv = false
+      , syncSent = false
 
-    const sync = () => {
-      d.emit('sync')
-      if (!tail) this.future(d.dispose)
-    }
-
-    const sendHistory = (clock, cb) => {
+    // We're readable and other side is writable
+    const sendHistory = (clock, next) => {
       const opts = { compat: true, tail, clock }
 
       d.setReadable(this.historyStream(opts).once('sync', () => {
-        d.push(SYNC_SIGNAL)
-
-        syncSent = true
-        d.emit('syncSent')
-
-        // When we have received remote's history
-        if (syncRecv) sync()
-        if (cb) cb()
+        sync('send')
+        next()
       }))
     }
 
-    const batcher = batchStream(this)
-    batcher.on('batch-drain', d.emit.bind(d, 'persist'))
+    // We're not readable or other side is not writable
+    const skipHistory = (isVoid, cb) => {
+      process.nextTick(() => {
+        sync('send')
 
-    const incoming = through2.obj((data, _, next) => {
+        // End if both sides are not writable
+        if (isVoid || !tail) d.setReadable(null)
+        else d.setReadable(through2.obj())
+
+        cb && cb()
+      })
+    }
+
+    // Handle signals and updates
+    const batcher = batchStream(this, (data, next) => {
       if (Array.isArray(data)) { // It's an update
-        if (writable && validate(data)) {
-          // TODO: write test to simulate late batch, early stream end
+        if (!writable) next(new Error('Not writable'))
+        else if (!validate(data)) next(new Error('Invalid update'))
+        else {
           const patch = this.convertScuttlebuttUpdate(data)
-          if (!this.filter(patch)) return next()
-          return next(null, patch)
+          return this.filter(patch) ? next(null, patch) : next()
         }
       } else if ('object' === typeof data && data) { // It's a digest
-        if (syncSent) return next()
-        else if (validate.digest(data)) return sendHistory(data.clock, next)
-        else return next(new Error('Invalid digest'))
+        if (syncSent) next(new Error('Sync signal already sent'))
+        else if (!readable) skipHistory(true, next)
+        else if (validate.digest(data)) sendHistory(data.clock, next)
+        else next(new Error('Invalid digest'))
       } else if (data === SYNC_SIGNAL) {
-        syncRecv = true
-        d.emit('syncReceived')
-        if (syncSent) sync()
+        if (syncRecv) next(new Error('Sync signal already received'))
+        else sync('receive', next)
+      } else if (data === READONLY_SIGNAL) {
+        skipHistory(false, next)
+      } else {
+        next(new Error('Invalid data'))
       }
-
-      next()
-    }, function flush(cb) {
-      batcher.flushBatch(cb)
     })
 
-    incoming.pipe(batcher)
-    d.setWritable(incoming)
+    d.setWritable(batcher.on('commit', d.emit.bind(d, 'commit')))
+
+    function sync(direction, cb) {
+      if (direction === 'send') {
+        d.push(SYNC_SIGNAL)
+        syncSent = true
+        d.emit('syncSent')
+      } else {
+        syncRecv = true
+        d.emit('syncReceived')
+      }
+
+      if (syncSent && syncRecv) {
+        batcher.commit(() => {
+          // Fully consumed each other's history. Switch to tick batching
+          batcher.setWindow(1)
+          d.emit('sync')
+        })
+      }
+
+      if (cb) cb()
+    }
 
     const destroy = d.destroy
-    d.dispose = d.destroy = (err) => {
-      this.removeListener('close', d.dispose)
-      d.removeListener('finish', d.dispose)
+    const onclose = d.end.bind(d)
+
+    // Make sure the readable side ends
+    const dispose = d.destroy = (err) => {
+      this.removeListener('close', onclose)
+      d.removeListener('finish', dispose)
 
       if (d.disposed) return
       d.disposed = true
@@ -247,21 +270,16 @@ class SpaceShuttle extends Emitter {
       if (err) destroy.call(d, err)
     }
 
-    d.on('finish', d.dispose)
-    this.on('close', d.dispose)
+    d.on('finish', dispose)
+    this.on('close', onclose)
 
-    // Send my current clock so the other side knows what to send.
-    // Clone the clock, because scuttlebutt mutates this object.
-    const digest = { id: this.id, clock: { ...this.memoryClock } }
-    if (opts.meta) digest.meta = opts.meta
-
-    if (readable) {
+    if (writable) {
+      // Send my current clock so the other side knows what to send.
+      const digest = { id: this.id, clock: { ...this.memoryClock } }
+      if (opts.meta) digest.meta = opts.meta
       d.push(digest)
-
-      // What's this?
-      if (!writable && !opts.clock) sendHistory()
-    } else if (opts.sendClock) {
-      d.push(digest)
+    } else {
+      d.push(READONLY_SIGNAL)
     }
 
     return d
@@ -297,33 +315,13 @@ class SpaceShuttle extends Emitter {
   batch(patches, options, cb) {
     if (typeof options === 'function') cb = options, options = {}
 
-    this.pendingBatches++
-
     if (!this.ready) {
-      return this.defer(() => {
-        this.pendingBatches--
-        this.batch(patches, options, cb)
-      }, () => {
-        this.emit('error', new Error('premature close, pending batch'))
-      })
+      return this.defer(() => { this.batch(patches, options, cb) })
     }
 
-    const batch = []
-        , newClock = {}
-
+    const batch = [], newClock = {}
     this._writePatches(batch, newClock, patches, options)
-
-    const next = (err) => {
-      // TODO: rewrite tests to rely on stream.on("persist") instead
-      if (--this.pendingBatches === 0) {
-        this.future(this.emit.bind(this, 'drain'))
-      }
-
-      if (cb) cb(err)
-      else if (err) this.emit('error', err)
-    }
-
-    if (batch.length === 0) return this.future(next)
+    if (batch.length === 0) return cb && this.future(cb)
 
     // Update clocks to latest in batch. Add to beginning, so
     // that this.memoryClock is updated (with post hook)
@@ -332,22 +330,20 @@ class SpaceShuttle extends Emitter {
       return { prefix: this.clock, key: source, value: newClock[source] }
     })
 
-    this.db.batch(prepend.concat(batch), next)
+    this.db.batch(prepend.concat(batch), cb || this.errback)
+  }
+
+  @autobind errback(err) {
+    if (err) this.emit('error', err)
   }
 
   erase(path, cb) {
-    const batcher = batchStream(this)
-
     pump( this.readStream({ path, values: false })
         , through2.obj(function(key, _, next) {
             return next(null, { path: key[0], erased: true })
           })
-        , batcher
-        , function(err){
-            if (err) return cb(err)
-            batcher.flushBatch(cb) // shouldn't be necessary
-          }
-        )
+        , batchStream(this)
+        , cb )
   }
 
   get(path, opts, cb) {
@@ -387,32 +383,34 @@ class SpaceShuttle extends Emitter {
       , iter = props.iterator(range)
 
     return {
-      next: function(cb) {
-        const handle = function(err, key, value) {
+      next: function outerNext(cb) {
+        function innerNext(err, key, value) {
           if (err || key === undefined) return cb(err)
 
           if (!old) { // Skip same (older) paths
             if (pathEquals(key[0], prev)) {
-              iter.end(noop)
+              return iter.end(function innerEnd(err) {
+                if (err) return cb(err)
 
-              // Skip ahead to next path
-              // TODO: this should be done natively with iterator#seek.
-              range.gt = [prev, HI]
-              return (iter = props.iterator(range)).next(handle)
+                // Skip ahead to next path
+                // TODO: this should be done natively with iterator#seek.
+                range.gt = [prev, HI]
+                return (iter = props.iterator(range)).next(innerNext)
+              })
             }
 
             prev = key[0]
           }
 
-          if (key[3] && !erased) return iter.next(handle)
+          if (key[3] && !erased) return iter.next(innerNext)
 
           cb(null, paths ? key[0] : keys ? key : null, values ? value : null)
         }
 
-        iter.next(handle)
+        iter.next(innerNext)
       },
 
-      end: function(cb) {
+      end: function outerEnd(cb) {
         iter.end(cb)
       }
     }
@@ -453,7 +451,7 @@ class SpaceShuttle extends Emitter {
         }
       }
 
-      if (typeof ts !== 'number' || typeof source !== 'string') {
+      if (typeof ts !== 'number' || ts <= 0 || typeof source !== 'string') {
         this.emit('invalid', { path, ts, source, value, erased })
         continue
       }
