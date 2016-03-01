@@ -18,7 +18,7 @@ test('replicate a lot', (t) => {
 
   function insert() {
     const batch = []
-    for(let i=0; i<100; i++) {
+    for(let i=0; i<1e3; i++) {
       batch.push({ key: count, value: count++ })
     }
 
