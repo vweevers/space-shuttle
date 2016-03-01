@@ -591,9 +591,9 @@ function run(adapter, factory) {
         stream1.pipe(stream2).pipe(stream1)
 
         eos(stream1, function(err) { t.ifError(err, 'no s1 error') })
-        eos(stream2, function(err) {
-          t.ifError(err, 'no s2 error')
+        eos(stream2, function(err) { t.ifError(err, 'no s2 error') })
 
+        stream2.on('sync', function(err) {
           same(t, db2.readStream(), [
             { key: [ [ 'a' ], -ts[0], 'a', false ], value: 1 },
             { key: [ [ 'b', 'b' ], -ts[1], 'a', false ], value: 'beee' }
@@ -638,7 +638,7 @@ function run(adapter, factory) {
         const db1 = space('a', factory())
         const db2 = space('b', factory())
 
-        t.plan(9)
+        t.plan(11)
 
         db1.batch([
           { key: 'a', value: 1 },
@@ -653,18 +653,25 @@ function run(adapter, factory) {
 
           if (tail) stream1.on('sync', function(){ stream1.end() })
 
-          stream1.on('sync', () => t.ok(true, 's1 emits sync'))
+          stream1.on('sync', () => t.ok(true, 's1 emits sync before end'))
           stream1.on('syncSent', () => t.ok(true, 's1 emits syncSent'))
+          stream1.on('syncReceived', () => t.ok(true, 's1 emits syncReceived'))
 
-          stream2.on('sync', () => t.ok(true, 's2 emits sync'))
+          stream2.on('sync', () => t.ok(true, 's2 emits sync before end'))
+          stream2.on('syncSent', () => t.ok(true, 's2 emits syncSent'))
           stream2.on('syncReceived', () => t.ok(true, 's2 emits syncReceived'))
 
           stream1.pipe(stream2).pipe(stream1)
 
-          eos(stream1, {readable:false}, function(err) { t.ifError(err, 'no s1 error') })
+          eos(stream1, {readable:false}, function(err) {
+            t.ifError(err, 'no s1 error')
+          })
+
           eos(stream2, {readable:false}, function(err) {
             t.ifError(err, 'no s2 error')
+          })
 
+          stream2.on('sync', function() {
             same(t, db2.readStream(), [
               { key: [ [ 'a' ], -ts[0], 'a', false ], value: 1 },
               { key: [ [ 'b', 'b' ], -ts[1], 'a', false ], value: 'beee' }
@@ -697,8 +704,9 @@ function run(adapter, factory) {
           stream1.pipe(stream2).pipe(stream1)
 
           eos(stream1, function(err) { t.ifError(err, 'no s1 error') })
-          eos(stream2, function(err) {
-            t.ifError(err, 'no s2 error')
+          eos(stream2, function(err) { t.ifError(err, 'no s2 error') })
+
+          stream2.on('sync', function(){
             same(t, db2.readStream(), [], 'data ok')
           })
         })
