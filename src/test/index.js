@@ -621,9 +621,9 @@ function run(adapter, factory) {
 
         stream1.pipe(stream2).pipe(stream1)
 
-        eos(stream1, function(err) { t.ifError(err, 'no s1 error') })
-        eos(stream2, function(err) {
-          t.ifError(err, 'no s2 error')
+        eos(stream2, function(err) { t.ifError(err, 'no s2 error') })
+        eos(stream1, function(err) {
+          t.ifError(err, 'no s1 error')
 
           same(t, db1.readStream(), [
             { key: [ [ 'a' ], -ts[0], 'b', false ], value: 1 },
