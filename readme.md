@@ -1,6 +1,6 @@
 # space-shuttle
 
-**Work in progress append-only scuttlebutt db with nested data.**
+**Work in progress append-only scuttlebutt db with nested data. Requires node >= 0.12.**
 
 [![npm status](http://img.shields.io/npm/v/space-shuttle.svg?style=flat-square)](https://www.npmjs.org/package/space-shuttle) [![Travis build status](https://img.shields.io/travis/vweevers/space-shuttle.svg?style=flat-square&label=travis)](http://travis-ci.org/vweevers/space-shuttle) [![AppVeyor build status](https://img.shields.io/appveyor/ci/vweevers/space-shuttle.svg?style=flat-square&label=appveyor)](https://ci.appveyor.com/project/vweevers/space-shuttle) [![Dependency status](https://img.shields.io/david/vweevers/space-shuttle.svg?style=flat-square)](https://david-dm.org/vweevers/space-shuttle)
 
@@ -9,7 +9,7 @@
 - Nested data; construct object graphs of any size
 - Retains full history. Data can't be truly deleted, but you can *erase* data. Erasing is like saying: "Forget that value I sent in an earlier update".
 - Streaming replication with eventual consistency. The only thing it needs to keep in memory is the latest timestamp of each source (to save unnecessary writes) (even without this, old updates will effectively be ignored because of how the db is ordered).
-- Tested in Node.js (0.12, 4 and 5) and Google Chrome with `leveldown` (node), a fork of `level.js` (Chrome) and `memdown` (both). The CI test matrix includes node 0.10 too, but there have been random failures. And in the browser I've seen a CPU usage of ~25%, during the initial sync of 60.000+ items.
+- Tested in Node.js (0.12, 4 and 5) and Google Chrome with `leveldown` (node), a fork of `level.js` (Chrome) and `memdown` (both). Note: in the browser I've seen a CPU usage of ~25%, during the initial sync of 60.000+ items.
 - ~~Compatible with [scuttlebutt/model](https://github.com/dominictarr/scuttlebutt)~~
 
 ## missing features
