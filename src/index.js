@@ -95,17 +95,21 @@ class SpaceShuttle extends Emitter {
     // Read clock into memory
     const update = (op) => {
       if (op.type !== 'del') {
-        this.memoryClock[op.key] = op.value // clock<source, ts>
+        const src = op.key, ts = op.value
+
+        if (!this.memoryClock[src] || this.memoryClock[src] < ts) {
+          this.memoryClock[src] = ts
+        }
       }
     }
+
+    const unhook = this.clock.post(update)
+    this.once('close', unhook)
 
     this.clock.createReadStream()
       .on('data', update)
       .on('error', this.errback)
       .on('end', () => {
-        const unhook = this.clock.post(update)
-        this.once('close', unhook)
-
         // Scuttlebutt streams and batches are deferred until now
         this.ready = true
         this.emit('ready')
