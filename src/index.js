@@ -73,13 +73,16 @@ class SpaceShuttle extends Emitter {
 
     // Install a hook to insert and clean up inverse props
     this.unhookPre = this.props.pre((op, add) => {
-      const { type, key: [ path, neg, source, erased ], value } = op
+      // Destructuring is nice but babel needlessly adds iterator support
+      const path   = op.key[0], neg    = op.key[1]
+          , source = op.key[2], erased = op.key[3]
+
       const inverseKey = [ source, -neg, path, erased ]
 
-      if (type === 'del') {
+      if (op.type === 'del') {
         add({ prefix: this.inverse, type: 'del', key: inverseKey })
       } else {
-        add({ prefix: this.inverse, type: 'put', key: inverseKey, value })
+        add({ prefix: this.inverse, type: 'put', key: inverseKey, value: op.value })
       }
     })
 
@@ -90,15 +93,23 @@ class SpaceShuttle extends Emitter {
 
   @autobind open() {
     // Read clock into memory
-    const s = liveStream(this.clock).on('data', ({ key: source, value: ts }) => {
-      this.memoryClock[source] = ts
-    }).once('sync', () => {
-      // Scuttlebutt streams and batches are deferred until now
-      this.ready = true
-      this.emit('ready')
-    }).once('error', this.errback)
+    const update = (op) => {
+      if (op.type !== 'del') {
+        this.memoryClock[op.key] = op.value // clock<source, ts>
+      }
+    }
 
-    this.once('close', s.end.bind(s))
+    this.clock.createReadStream()
+      .on('data', update)
+      .on('error', this.errback)
+      .on('end', () => {
+        const unhook = this.clock.post(update)
+        this.once('close', unhook)
+
+        // Scuttlebutt streams and batches are deferred until now
+        this.ready = true
+        this.emit('ready')
+      })
   }
 
   @autobind close() {
@@ -116,7 +127,7 @@ class SpaceShuttle extends Emitter {
     const clock = opts && opts.clock ? { ...opts.clock } : {} // Clone, b/c we mutate
 
     const outer = through2.obj(function({ key, value }, _, next) {
-      const [ source, ts, path, erased ] = key
+      const source = key[0], ts = key[1], path = key[2], erased = key[3]
 
       if (compat) { // Convert to dc's scuttlebutt format
         const trx = [ join(path), erased ? undefined : value ]
@@ -140,7 +151,7 @@ class SpaceShuttle extends Emitter {
 
       // Skip updates if remote already has them
       streams.push(live.pipe(through2.obj(function filter(kv, _, next) {
-        const [ source, ts ] = kv.key
+        const source = kv.key[0], ts = kv.key[1]
         if (clock[source] && clock[source] >= ts) return next()
         else clock[source] = ts
         next(null, kv)
@@ -299,8 +310,11 @@ class SpaceShuttle extends Emitter {
 
   // Temporary compatibility with dc's scuttlebutt/model
   convertScuttlebuttUpdate(update) {
-    const [ trx, ts, source ] = update
-    const [ path, value ] = trx
+    const path = update[0][0]
+        , value = update[0][1]
+        , ts = update[1]
+        , source = update[2]
+
     return { source, ts, path, value }
   }
 
