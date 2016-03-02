@@ -40,12 +40,11 @@ function skipStream(db, clockDb, opts) {
   }
 
   function next(iter) {
-    // TODO: if we have just one iter, there's no need to sort
-    iter.next(function(err, key, value){
+    iter.next(function innerNext(err, key, value){
       if (err) return stream.destroy(err)
 
       if (key === undefined) {
-        return iter.end(function(err){
+        return iter.end(function innerEnd(err){
           if (err) return stream.destroy(err)
 
           if (--distinct.length === 0) { // Flush and end
@@ -57,12 +56,8 @@ function skipStream(db, clockDb, opts) {
         })
       }
 
-      try {
-        // Sorting on key[1], which is "ts", the predicate edge
-        heap.push([key[1], { key, value }, iter ])
-      } catch(err) {
-        return stream.destroy(err)
-      }
+      // Sorting on key[1], which is "ts", the predicate edge
+      heap.push([key[1], { key, value }, iter ])
 
       // Write when we have an element from each iterator
       if (heap.length === distinct.length) stream.pull()
@@ -71,7 +66,8 @@ function skipStream(db, clockDb, opts) {
 
   function pull() {
     // Take the first (smallest) element from the heap, push kv, then refill
-    const [ _, kv, iter ] = heap.shift()
+    const entry = heap.shift()
+    const kv = entry[1], iter = entry[2]
     next(iter)
     return kv
   }
@@ -79,7 +75,9 @@ function skipStream(db, clockDb, opts) {
 
 module.exports = skipStream
 
-function cmp ([a], [b]) {
+function cmp (a_, b_) {
+  const a = a_[0], b = b_[0]
+
   if (a === b) return 0
   else if (a > b) return 1
   else if (a < b) return -1
