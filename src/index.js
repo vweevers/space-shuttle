@@ -2,7 +2,7 @@
 
 const bytespace = require('bytespace')
     , bytewise = require('bytewise-core')
-    , bytewiseHex = require('bytewise/encoding/hex')
+    , bytewiseHex = require('./hex')
     , through2 = require('through2')
     , t = require('mini-type-assert')
     , Emitter = require('events').EventEmitter

@@ -10,6 +10,7 @@
   "main": "lib/index.js",
   "files": [
     "lib/index.js",
+    "lib/hex.js",
     "lib/batch-stream.js",
     "lib/skip-stream.js",
     "lib/live-stream.js"
@@ -31,9 +32,8 @@
   "dependencies": {
     "autobind-decorator": "~1.3.3",
     "batch-stream": "~0.1.2",
-    "bytespace": "vweevers/bytespace#dev",
-    "bytewise": "~1.1.0",
-    "bytewise-core": "~1.2.3",
+    "bytespace": "vweevers/bytespace#perf",
+    "bytewise-core": "vweevers/bytewise-core#perf",
     "duplexify": "~3.4.2",
     "end-of-stream": "~1.1.0",
     "fast-future": "~1.0.1",
