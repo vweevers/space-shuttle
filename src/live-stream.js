@@ -14,7 +14,7 @@ function liveStream(db, opts = {}) {
 
     if (tail) {
       let unhook = db.post(function(op){
-        if (op.type !== 'del') output.write(op)
+        if (op.type !== 'del') output.push(op)
       })
 
       function stop() {
